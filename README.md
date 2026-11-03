@@ -81,3 +81,6 @@ selinux=permissive  # 或 selinux=0
 
 内核源码遵循各自上游许可（LineageOS 分支基于 Qualcomm msm-4.9，GPLv2）。
 本仓库的 CI 配置为 MIT。
+
+
+<!-- trigger build: WERROR disabled, hard checks added -->
