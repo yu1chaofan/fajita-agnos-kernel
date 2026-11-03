@@ -124,12 +124,18 @@ jobs:
           echo "make exit code: $RC"
           if [ $RC -ne 0 ]; then
             echo "=== BUILD FAILED ==="
-            echo "--- error lines ---"
-            grep -nE "error:|Error [0-9]|undefined reference|cannot find|No rule" /tmp/build.log | head -40 || true
+            echo "--- real compiler errors (grep 'error:' only) ---"
+            grep -nE "error:|fatal error|undefined reference" /tmp/build.log | head -30 || echo "(no error: lines)"
+            echo "--- context around first failing dir ---"
+            FIRST_FAIL=$(grep -nE "\*\*\* .*Error 1" /tmp/build.log | head -1 | cut -d: -f1)
+            if [ -n "$FIRST_FAIL" ]; then
+              START=$((FIRST_FAIL > 25 ? FIRST_FAIL - 25 : 1))
+              sed -n "${START},${FIRST_FAIL}p" /tmp/build.log
+            fi
             echo "--- last 30 lines ---"
             tail -30 /tmp/build.log
             echo "--- full log uploaded as artifact for inspection ---"
-            cp /tmp/build.log build-failed.log || true
+            cp /tmp/build.log "$GITHUB_WORKSPACE/build-failed.log" || true
             exit 1
           fi
           echo "=== build ok ==="
