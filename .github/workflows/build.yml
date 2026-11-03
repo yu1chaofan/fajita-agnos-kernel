@@ -98,6 +98,12 @@ jobs:
             'CONFIG_EXT4_FS=y' \
             'CONFIG_SCSI_UFS_QCOM=y' \
             '# CONFIG_CC_WERROR is not set' \
+            'CONFIG_PSTORE=y' \
+            'CONFIG_PSTORE_CONSOLE=y' \
+            'CONFIG_PSTORE_PMSG=y' \
+            'CONFIG_PSTORE_RAM=y' \
+            'CONFIG_PSTORE_DEFLATE_COMPRESS=y' \
+            'CONFIG_PSTORE_PMSG_SSPLUS=y' \
             'CONFIG_DEVTMPFS=y' \
             'CONFIG_DEVTMPFS_MOUNT=y' \
             'CONFIG_FANOTIFY=y' \
