@@ -117,11 +117,21 @@ jobs:
         run: |
           set -euo pipefail
           cd kernel
-          make O=out ARCH=arm64 -j$(nproc) KCFLAGS='-Wno-error' Image.gz-dtb > /tmp/build.log 2>&1 || {
+          set +e
+          make O=out ARCH=arm64 -j$(nproc) KCFLAGS='-Wno-error' Image.gz-dtb > /tmp/build.log 2>&1
+          RC=$?
+          set -e
+          echo "make exit code: $RC"
+          if [ $RC -ne 0 ]; then
             echo "=== BUILD FAILED ==="
-            tail -80 /tmp/build.log
+            echo "--- error lines ---"
+            grep -nE "error:|Error [0-9]|undefined reference|cannot find|No rule" /tmp/build.log | head -40 || true
+            echo "--- last 30 lines ---"
+            tail -30 /tmp/build.log
+            echo "--- full log uploaded as artifact for inspection ---"
+            cp /tmp/build.log build-failed.log || true
             exit 1
-          }
+          fi
           echo "=== build ok ==="
           tail -20 /tmp/build.log
 
@@ -161,6 +171,14 @@ jobs:
           ls -lh out-artifacts/
           sha256sum out-artifacts/* > out-artifacts/SHA256SUMS.txt
           cat out-artifacts/SHA256SUMS.txt
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: build-failed.log
+          retention-days: 7
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
