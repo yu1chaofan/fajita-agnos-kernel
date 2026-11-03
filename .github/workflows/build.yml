@@ -28,7 +28,6 @@ permissions:
 
 jobs:
   build:
-    # 原生 arm64 runner：内核是 arm64，不需要交叉编译，公开仓库免费
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
 
@@ -45,40 +44,35 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev \
-            ccache rsync cpio kmod lz4 zstd git
-          gcc --version | head -1
+            ccache rsync cpio kmod lz4 zstd git clang lld llvm
+          echo "gcc:  $(gcc --version | head -1)"
+          echo "clang: $(clang --version | head -1)"
 
-      - name: Clone kernel source (shallow)
+      - name: Clone kernel source
         env:
           KREPO: ${{ github.event.inputs.kernel_repo || 'https://github.com/LineageOS/android_kernel_oneplus_sdm845.git' }}
           KBRANCH: ${{ github.event.inputs.kernel_branch || 'lineage-22.2' }}
         run: |
           set -e
-          echo "cloning $KREPO @ $KBRANCH"
           git clone --depth 1 -b "$KBRANCH" "$KREPO" kernel
           cd kernel
           echo "commit: $(git rev-parse HEAD)"
-          echo "version: $(head -4 Makefile | tr '\n' ' ')"
-          du -sh .
+          head -4 Makefile
 
       - name: Apply local patches
         run: |
           set -e
-          if [ -d "patches" ] && [ -n "$(ls -A patches 2>/dev/null)" ]; then
-            cd kernel
+          cd kernel
+          if ls ../patches/*.patch >/dev/null 2>&1; then
             for p in ../patches/*.patch; do
-              [ -f "$p" ] || continue
-              echo "== applying $(basename $p)"
+              echo "== $(basename $p)"
               git apply -v "$p" || patch -p1 < "$p"
             done
-            cd ..
-            echo "patches applied"
           else
             echo "no patches"
           fi
 
       - name: Configure
-        id: cfg
         env:
           DEFCONFIG: ${{ github.event.inputs.defconfig || 'enchilada_defconfig' }}
           VARIANT: ${{ github.event.inputs.variant || 'perf' }}
@@ -86,41 +80,38 @@ jobs:
           set -e
           cd kernel
           mkdir -p out
-          echo "=== available defconfigs ==="
-          ls arch/arm64/configs/ | grep -E "sdm845|enchilada|fajita" || true
           make O=out ARCH=arm64 "$DEFCONFIG"
           FRAG="arch/arm64/configs/vendor/sdm845-${VARIANT}_defconfig"
           if [ -n "$VARIANT" ] && [ -f "$FRAG" ]; then
-            echo "=== merge $FRAG ==="
             cat "$FRAG" >> out/.config
           fi
-          # AGNOS 必需项（强制写回，防止 olddefconfig 关闭）
-          for opt in \
-            CONFIG_ANDROID=y \
-            CONFIG_ANDROID_BINDER_IPC=y \
-            CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y \
-            CONFIG_IKCONFIG=y \
-            CONFIG_IKCONFIG_PROC=y \
-            CONFIG_USB_CONFIGFS=y \
-            CONFIG_USB_CONFIGFS_NCM=y \
-            CONFIG_USB_CONFIGFS_F_FS=y \
-            CONFIG_SECURITY_SELINUX=y \
-            CONFIG_EXT4_FS=y \
-            CONFIG_SCSI_UFS_QCOM=y ; do
-            key="${opt%%=*}"
-            sed -i "/^${key}[= ]/d" out/.config
-            echo "$opt" >> out/.config
-          done
+          # AGNOS 必需项 + 关闭把 warning 当错误
+          cat >> out/.config <<'CFG'
+CONFIG_ANDROID=y
+CONFIG_ANDROID_BINDER_IPC=y
+CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+CONFIG_USB_CONFIGFS=y
+CONFIG_USB_CONFIGFS_NCM=y
+CONFIG_USB_CONFIGFS_F_FS=y
+CONFIG_SECURITY_SELINUX=y
+CONFIG_EXT4_FS=y
+CONFIG_SCSI_UFS_QCOM=y
+CFG
+          # 关键：关掉 WERROR，否则 gcc15 会因 format 严格而失败
+          scripts/config --file out/.config -d WERROR 2>/dev/null || \
+            sed -i 's/^CONFIG_WERROR=.*/# CONFIG_WERROR is not set/' out/.config
+          echo "# CONFIG_WERROR is not set" >> out/.config
           make O=out ARCH=arm64 olddefconfig
-          echo "config ready"
+          grep -E "^CONFIG_WERROR" out/.config || echo "WERROR disabled"
 
       - name: Verify critical configs
         run: |
           set -e
           cd kernel
           MISS=0
-          for opt in \
-            CONFIG_ANDROID CONFIG_ANDROID_BINDER_IPC \
+          for opt in CONFIG_ANDROID CONFIG_ANDROID_BINDER_IPC \
             CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE CONFIG_IKCONFIG_PROC \
             CONFIG_USB_CONFIGFS CONFIG_USB_CONFIGFS_NCM \
             CONFIG_SPECTRA_CAMERA CONFIG_MSM_CAMCC_SDM845 \
@@ -129,38 +120,62 @@ jobs:
             if grep -q "^${opt}=y" out/.config; then echo "  OK   $opt"; else echo "  MISS $opt"; MISS=$((MISS+1)); fi
           done
           echo "missing=$MISS"
-          [ $MISS -le 3 ] || { echo "::error::too many missing"; exit 1; }
+          [ $MISS -le 3 ] || { echo "::error::too many missing configs"; exit 1; }
 
       - name: Build kernel
         run: |
-          set -e
+          set -euo pipefail
           cd kernel
-          echo "=== building with $(nproc) jobs ==="
-          make O=out ARCH=arm64 -j$(nproc) Image.gz-dtb 2>&1 | tail -60
+          echo "=== building ==="
+          make O=out ARCH=arm64 -j$(nproc) Image.gz-dtb > /tmp/build.log 2>&1 || {
+            echo "=== BUILD FAILED, last 80 lines ==="
+            tail -80 /tmp/build.log
+            exit 1
+          }
+          echo "=== build ok, last 20 lines ==="
+          tail -20 /tmp/build.log
 
       - name: Build device tree blobs
         continue-on-error: true
         run: |
           cd kernel
-          make O=out ARCH=arm64 -j$(nproc) dtbs 2>&1 | tail -30
+          make O=out ARCH=arm64 -j$(nproc) dtbs > /tmp/dtbs.log 2>&1 || tail -30 /tmp/dtbs.log
 
-      - name: Package
+      - name: Package (fail if no kernel image)
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p out-artifacts
           cd kernel
-          ls -lh arch/arm64/boot/ 2>/dev/null || true
+          echo "=== boot dir ==="
+          ls -lh out/arch/arm64/boot/ || true
+
+          FOUND=""
           for f in Image.gz-dtb Image.gz Image; do
-            [ -f "out/arch/arm64/boot/$f" ] && cp "out/arch/arm64/boot/$f" ../out-artifacts/ && echo "packed $f"
+            if [ -f "out/arch/arm64/boot/$f" ]; then
+              cp "out/arch/arm64/boot/$f" ../out-artifacts/
+              echo "packed $f ($(stat -c%s ../out-artifacts/$f) bytes)"
+              FOUND="$f"
+              break
+            fi
           done
+
+          if [ -z "$FOUND" ]; then
+            echo "::error::没有生成任何内核镜像 (Image.gz-dtb/Image.gz/Image)"
+            exit 1
+          fi
+
           find out -name "*fajita*.dtbo" -exec cp {} ../out-artifacts/ \; 2>/dev/null || true
           cp out/.config ../out-artifacts/kernel.config
           cd ..
-          echo "=== artifacts ==="
+          # 大小合理性检查：内核镜像应 > 5MB
+          SIZE=$(stat -c%s out-artifacts/$FOUND)
+          if [ "$SIZE" -lt 5000000 ]; then
+            echo "::error::内核镜像过小 ($SIZE bytes)，可能不完整"
+            exit 1
+          fi
           ls -lh out-artifacts/
           sha256sum out-artifacts/* > out-artifacts/SHA256SUMS.txt
           cat out-artifacts/SHA256SUMS.txt
-          echo "kernel_commit=$(cd kernel && git rev-parse --short HEAD)" >> $GITHUB_ENV
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
