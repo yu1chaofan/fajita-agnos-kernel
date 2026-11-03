@@ -85,54 +85,43 @@ jobs:
           if [ -n "$VARIANT" ] && [ -f "$FRAG" ]; then
             cat "$FRAG" >> out/.config
           fi
-          # AGNOS 必需项 + 关闭把 warning 当错误
-          cat >> out/.config <<'CFG'
-CONFIG_ANDROID=y
-CONFIG_ANDROID_BINDER_IPC=y
-CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
-CONFIG_IKCONFIG=y
-CONFIG_IKCONFIG_PROC=y
-CONFIG_USB_CONFIGFS=y
-CONFIG_USB_CONFIGFS_NCM=y
-CONFIG_USB_CONFIGFS_F_FS=y
-CONFIG_SECURITY_SELINUX=y
-CONFIG_EXT4_FS=y
-CONFIG_SCSI_UFS_QCOM=y
-CFG
-          # 关键：关掉 WERROR，否则 gcc15 会因 format 严格而失败
-          scripts/config --file out/.config -d WERROR 2>/dev/null || \
-            sed -i 's/^CONFIG_WERROR=.*/# CONFIG_WERROR is not set/' out/.config
-          echo "# CONFIG_WERROR is not set" >> out/.config
+          printf '%s\n' \
+            'CONFIG_ANDROID=y' \
+            'CONFIG_ANDROID_BINDER_IPC=y' \
+            'CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y' \
+            'CONFIG_IKCONFIG=y' \
+            'CONFIG_IKCONFIG_PROC=y' \
+            'CONFIG_USB_CONFIGFS=y' \
+            'CONFIG_USB_CONFIGFS_NCM=y' \
+            'CONFIG_USB_CONFIGFS_F_FS=y' \
+            'CONFIG_SECURITY_SELINUX=y' \
+            'CONFIG_EXT4_FS=y' \
+            'CONFIG_SCSI_UFS_QCOM=y' \
+            '# CONFIG_WERROR is not set' >> out/.config
           make O=out ARCH=arm64 olddefconfig
-          grep -E "^CONFIG_WERROR" out/.config || echo "WERROR disabled"
+          grep -E "^CONFIG_WERROR" out/.config || echo "WERROR disabled OK"
 
       - name: Verify critical configs
         run: |
           set -e
           cd kernel
           MISS=0
-          for opt in CONFIG_ANDROID CONFIG_ANDROID_BINDER_IPC \
-            CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE CONFIG_IKCONFIG_PROC \
-            CONFIG_USB_CONFIGFS CONFIG_USB_CONFIGFS_NCM \
-            CONFIG_SPECTRA_CAMERA CONFIG_MSM_CAMCC_SDM845 \
-            CONFIG_TOUCHSCREEN_SYNAPTICS_DSX_CORE \
-            CONFIG_MSM_DISPCC_SDM845 CONFIG_SCSI_UFS_QCOM CONFIG_EXT4_FS ; do
+          for opt in CONFIG_ANDROID CONFIG_ANDROID_BINDER_IPC CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE CONFIG_IKCONFIG_PROC CONFIG_USB_CONFIGFS CONFIG_USB_CONFIGFS_NCM CONFIG_SPECTRA_CAMERA CONFIG_MSM_CAMCC_SDM845 CONFIG_TOUCHSCREEN_SYNAPTICS_DSX_CORE CONFIG_MSM_DISPCC_SDM845 CONFIG_SCSI_UFS_QCOM CONFIG_EXT4_FS ; do
             if grep -q "^${opt}=y" out/.config; then echo "  OK   $opt"; else echo "  MISS $opt"; MISS=$((MISS+1)); fi
           done
           echo "missing=$MISS"
-          [ $MISS -le 3 ] || { echo "::error::too many missing configs"; exit 1; }
+          test $MISS -le 3 || { echo "::error::too many missing configs"; exit 1; }
 
       - name: Build kernel
         run: |
           set -euo pipefail
           cd kernel
-          echo "=== building ==="
           make O=out ARCH=arm64 -j$(nproc) Image.gz-dtb > /tmp/build.log 2>&1 || {
-            echo "=== BUILD FAILED, last 80 lines ==="
+            echo "=== BUILD FAILED ==="
             tail -80 /tmp/build.log
             exit 1
           }
-          echo "=== build ok, last 20 lines ==="
+          echo "=== build ok ==="
           tail -20 /tmp/build.log
 
       - name: Build device tree blobs
@@ -141,36 +130,31 @@ CFG
           cd kernel
           make O=out ARCH=arm64 -j$(nproc) dtbs > /tmp/dtbs.log 2>&1 || tail -30 /tmp/dtbs.log
 
-      - name: Package (fail if no kernel image)
+      - name: Package
         run: |
           set -euo pipefail
           mkdir -p out-artifacts
           cd kernel
-          echo "=== boot dir ==="
           ls -lh out/arch/arm64/boot/ || true
-
           FOUND=""
           for f in Image.gz-dtb Image.gz Image; do
             if [ -f "out/arch/arm64/boot/$f" ]; then
               cp "out/arch/arm64/boot/$f" ../out-artifacts/
-              echo "packed $f ($(stat -c%s ../out-artifacts/$f) bytes)"
+              echo "packed $f"
               FOUND="$f"
               break
             fi
           done
-
           if [ -z "$FOUND" ]; then
-            echo "::error::没有生成任何内核镜像 (Image.gz-dtb/Image.gz/Image)"
+            echo "::error::no kernel image produced"
             exit 1
           fi
-
           find out -name "*fajita*.dtbo" -exec cp {} ../out-artifacts/ \; 2>/dev/null || true
           cp out/.config ../out-artifacts/kernel.config
           cd ..
-          # 大小合理性检查：内核镜像应 > 5MB
           SIZE=$(stat -c%s out-artifacts/$FOUND)
           if [ "$SIZE" -lt 5000000 ]; then
-            echo "::error::内核镜像过小 ($SIZE bytes)，可能不完整"
+            echo "::error::kernel image too small ($SIZE bytes)"
             exit 1
           fi
           ls -lh out-artifacts/
