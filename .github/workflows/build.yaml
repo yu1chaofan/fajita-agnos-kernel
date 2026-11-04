@@ -78,7 +78,14 @@ jobs:
         run: |
           cd agnos
           ls -d agnos-kernel-sdm845 tools vble-qti.key Dockerfile.builder
-          grep -n "comma_fajita" agnos-kernel-sdm845/arch/arm64/boot/dts/qcom/Makefile
+          QCOM=agnos-kernel-sdm845/arch/arm64/boot/dts/qcom
+          grep -n "fajita-vendor" $QCOM/Makefile
+          grep -n "comma_fajita" $QCOM/fajita-vendor/Makefile
+          test -f $QCOM/fajita-vendor/comma_fajita.dts
+          # the DT include closure must be complete before the container build
+          ls $QCOM/fajita-vendor/*.dts $QCOM/fajita-vendor/*.dtsi | wc -l
+          test -f $QCOM/fajita-vendor/sdm845-v2.1-mtp.dts
+          test -f $QCOM/fajita-vendor/dsi-panel-samsung_s6e3fc2x01.dtsi
           test -f agnos-kernel-sdm845/arch/arm64/configs/agnos_fajita.fragment
 
       - name: Extract toolchain
