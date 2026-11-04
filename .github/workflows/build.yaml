@@ -97,6 +97,23 @@ jobs:
           git lfs install --skip-repo
           cd agnos && ./tools/extract_tools.sh
 
+      - name: Check the dtc cpp path inside the builder image
+        # The generic dtc rule is `CPP ... ; DTC ...` with `;`, so a failing
+        # preprocessor silently hands the raw .dts to dtc and the error looks
+        # like a DTS syntax error.  Prove cpp works in this container first.
+        run: |
+          set -x
+          docker run --rm -v $PWD:/w -w /w agnos-meta-builder:probe true 2>/dev/null || true
+          cd agnos
+          grep -n "^CPP" agnos-kernel-sdm845/Makefile
+          printf '#include "sdm845-v2.1.dtsi"\n/ { };\n' > /tmp/probe.dts
+          cpp -nostdinc -Iagnos-kernel-sdm845/arch/arm64/boot/dts/qcom \
+              -Iagnos-kernel-sdm845/arch/arm64/boot/dts/include \
+              -undef -D__DTS__ -x assembler-with-cpp -o /tmp/probe.out /tmp/probe.dts \
+            && echo "host cpp OK" || echo "host cpp FAILED"
+          which gcc; readlink -f $(which gcc) || true
+          gcc -E -x assembler-with-cpp - </dev/null >/dev/null 2>&1 && echo "gcc -E OK" || echo "gcc -E FAILED"
+
       - name: Build kernel + boot.img
         env:
           CCACHE_DIR: ${{ github.workspace }}/agnos/.ccache

@@ -11,7 +11,10 @@ consumer node (SPECTRA camera, sensorhub SPI bridge, fsa4480, nq-nci).
 The DTS is compiled against the LineageOS include chain, which
 scripts/materialize.sh fills into this same directory without touching the
 dtsi files AGNOS already ships (they are a trimmed comma-SoM fork and back
-comma_tizi/mici/ultimate).
+comma_tizi/mici/ultimate).  materialize.sh also preprocesses this file on the
+host and writes the flattened result back, so the in-container cpp -- which
+the generic dtc rule invokes with ';' and cannot report failures from -- is
+not involved.
 
 Applies on LineageOS/android_kernel_oneplus_sdm845@228c16b.
 

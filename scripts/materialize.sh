@@ -63,6 +63,7 @@ for ext in dtsi dts; do
 done
 echo "added $copied LineageOS DT files that AGNOS did not ship"
 
+
 # One deliberate exception: sdm845-mtp.dtsi re-enables &ext_5v_boost, and the
 # AGNOS copy of sdm845-pmic-overlay.dtsi does not declare that label.  Add the
 # regulator to the AGNOS file; it stays status="disabled" exactly like
@@ -124,6 +125,26 @@ for p in "$PATCHES"/kernel/*.patch; do
   echo "-- $(basename "$p")"
   patch -p1 --batch --forward -i "$p"
 done
+
+
+# Preprocess comma_fajita.dts on the host into a self-contained file.  The
+# in-container cpp is $(CC) -E with a ccache symlink in front, and the generic
+# dtc rule chains cpp and dtc with ';' so a preprocessor failure silently hands
+# the raw .dts to dtc -- which then reports a bogus syntax error at the first
+# #include.  Flattening here removes that whole failure mode.
+FAJ_DTS="$DTS_DST/comma_fajita.dts"
+if [ -f "$FAJ_DTS" ]; then
+  grep -v -e '^$' "$FAJ_DTS" > /dev/null
+  cpp -nostdinc -I"$DTS_DST" \
+      -I"$WORK/agnos/agnos-kernel-sdm845/arch/arm64/boot/dts/include" \
+      -undef -D__DTS__ -P -x assembler-with-cpp -o "$FAJ_DTS.flat" "$FAJ_DTS"
+  # keep exactly one /dts-v1/; at the top
+  awk 'BEGIN{seen=0} /^[[:space:]]*\/dts-v1\/;/{ if(seen) next; seen=1 } {print}' \
+    "$FAJ_DTS.flat" > "$FAJ_DTS.tmp" && mv "$FAJ_DTS.tmp" "$FAJ_DTS.flat"
+  mv "$FAJ_DTS.flat" "$FAJ_DTS"
+  echo "flattened comma_fajita.dts -> $(wc -l < "$FAJ_DTS") lines"
+fi
+
 
 echo "== summary"
 git -C "$WORK/agnos" --no-pager log --oneline -1
