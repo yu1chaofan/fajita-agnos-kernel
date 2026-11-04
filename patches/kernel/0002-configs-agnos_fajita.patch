@@ -303,15 +303,13 @@ new file mode 100644
 +CONFIG_CAN_MCP25XXFD=y
 +CONFIG_BT=y
 +CONFIG_MSM_BT_POWER=y
-+# BTFM_SLIM is `bool` with `default MSM_BT_POWER`, so turning MSM_BT_POWER on
-+# silently enables it -- and tici_defconfig's "CONFIG_BTFM_SLIM=n" is not a
-+# valid Kconfig line ("=n" for a bool is ignored by olddefconfig), so it does
-+# not turn it off.  bluetooth-power.c then calls btfm_slim_hw_init() while
-+# btfm_slim.o is not linked:
-+#   ld: drivers/built-in.o: undefined reference to `btfm_slim_hw_init'
-+# AGNOS has no SLIMBUS BT/FM bridge; turn it off explicitly.
-+# CONFIG_BTFM_SLIM is not set
-+# CONFIG_BTFM_SLIM_WCN3990 is not set
++# agnos-kernel's bluetooth-power.c calls btfm_slim_hw_init() unconditionally
++# (no #ifdef guard, unlike LineageOS' copy), so BTFM_SLIM must be linked in
++# whenever MSM_BT_POWER=y -- otherwise the final link fails with
++#   ld: drivers/built-in.o: in function `bt_ioctl':
++#       bluetooth-power.c:698: undefined reference to `btfm_slim_hw_init'
++CONFIG_BTFM_SLIM=y
++CONFIG_BTFM_SLIM_WCN3990=y
 +CONFIG_CFG80211=y
 +CONFIG_CFG80211_CERTIFICATION_ONUS=y
 +CONFIG_CFG80211_REG_CELLULAR_HINTS=y
