@@ -12,9 +12,7 @@ comma_fajita.dts is built against the LineageOS DT include closure: AGNOS'
 dtsi files are a trimmed comma-SoM fork (sdm845.dtsi, sdm845-pinctrl.dtsi,
 pmi8998.dtsi and the PMIC overlays all differ) and do not carry what
 sdm845-mtp.dtsi needs, notably the &ext_5v_boost regulator.  materialize.sh
-vendors that closure into fajita-vendor/ and this Makefile adds an explicit
-rule for the one target, because Makefile.lib's dtc_cpp_flags carries no
-cppflags-y and only searches $(dir $<).  AGNOS' own dtsi files stay
+vendors that closure into fajita-vendor/.  AGNOS' own dtsi files stay
 untouched, so comma_tizi/mici/ultimate keep building.
 
 Applies on LineageOS/android_kernel_oneplus_sdm845@228c16b.
@@ -22,23 +20,24 @@ Applies on LineageOS/android_kernel_oneplus_sdm845@228c16b.
 diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
 --- a/arch/arm64/boot/dts/qcom/Makefile
 +++ b/arch/arm64/boot/dts/qcom/Makefile
-@@ -5,7 +5,25 @@
+@@ -5,7 +5,26 @@
  dtb-$(CONFIG_ARCH_SDM845) += comma_tizi.dtb
  dtb-$(CONFIG_ARCH_SDM845) += comma_mici.dtb
  dtb-$(CONFIG_ARCH_SDM845) += comma_ultimate_provisioning.dtb
 +dtb-$(CONFIG_ARCH_SDM845) += comma_fajita.dtb
 +
-+# comma_fajita.dts includes the LineageOS DT closure vendored in fajita-vendor/
-+# (AGNOS' trimmed dtsi set does not define what sdm845-mtp.dtsi references).
-+# The generic rule in scripts/Makefile.lib only searches -i $(dir $<) and
-+# dtc_cpp_flags ignores cppflags-y, so give this target its own recipe.
-+# $(src)/$(obj) are relative to the kernel build root here, so anchor them
-+# on srctree/objtree before handing them to cpp/dtc.
-+fajita_dts_dir := $(abspath $(srctree)/$(src)/fajita-vendor)
++# comma_fajita.dts includes the LineageOS DT closure vendored in
++# fajita-vendor/ (AGNOS' trimmed dtsi set does not define what
++# sdm845-mtp.dtsi references).  Makefile.lib's dtc_cpp_flags carries no
++# cppflags-y and only searches $(dir $<), so this target gets its own
++# recipe.  The include path is built inside the recipe: $(src) is not
++# final when this file is parsed.
 +quiet_cmd_dtc_fajita = DTC     $@
-+cmd_dtc_fajita = mkdir -p $(dir $(dtc-tmp)) ; \
-+	$(CPP) $(dtc_cpp_flags) -I$(fajita_dts_dir) -x assembler-with-cpp -o $(dtc-tmp) $< ; \
-+	$(DTC) -O dtb -o $@ -b 0 -i $(dir $<) -i $(fajita_dts_dir) $(DTC_FLAGS) \
++cmd_dtc_fajita = \
++	fjdir=$$(cd $(srctree)/$(src)/fajita-vendor && pwd) ; \
++	mkdir -p $(dir $(dtc-tmp)) ; \
++	$(CPP) $(dtc_cpp_flags) -I$$fjdir -I$(dir $<) -x assembler-with-cpp -o $(dtc-tmp) $< ; \
++	$(DTC) -O dtb -o $@ -b 0 -i $(dir $<) -i $$fjdir $(DTC_FLAGS) \
 +		-d $(depfile).dtc.tmp $(dtc-tmp) ; \
 +	cat $(depfile).pre.tmp $(depfile).dtc.tmp > $(depfile)
 +
