@@ -22,7 +22,7 @@ Applies on LineageOS/android_kernel_oneplus_sdm845@228c16b.
 diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
 --- a/arch/arm64/boot/dts/qcom/Makefile
 +++ b/arch/arm64/boot/dts/qcom/Makefile
-@@ -5,7 +5,22 @@
+@@ -5,7 +5,25 @@
  dtb-$(CONFIG_ARCH_SDM845) += comma_tizi.dtb
  dtb-$(CONFIG_ARCH_SDM845) += comma_mici.dtb
  dtb-$(CONFIG_ARCH_SDM845) += comma_ultimate_provisioning.dtb
@@ -32,10 +32,13 @@ diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefi
 +# (AGNOS' trimmed dtsi set does not define what sdm845-mtp.dtsi references).
 +# The generic rule in scripts/Makefile.lib only searches -i $(dir $<) and
 +# dtc_cpp_flags ignores cppflags-y, so give this target its own recipe.
++# $(src)/$(obj) are relative to the kernel build root here, so anchor them
++# on srctree/objtree before handing them to cpp/dtc.
++fajita_dts_dir := $(abspath $(srctree)/$(src)/fajita-vendor)
 +quiet_cmd_dtc_fajita = DTC     $@
 +cmd_dtc_fajita = mkdir -p $(dir $(dtc-tmp)) ; \
-+	$(CPP) $(dtc_cpp_flags) -I$(src)/fajita-vendor -x assembler-with-cpp -o $(dtc-tmp) $< ; \
-+	$(DTC) -O dtb -o $@ -b 0 -i $(dir $<) -i $(src)/fajita-vendor $(DTC_FLAGS) \
++	$(CPP) $(dtc_cpp_flags) -I$(fajita_dts_dir) -x assembler-with-cpp -o $(dtc-tmp) $< ; \
++	$(DTC) -O dtb -o $@ -b 0 -i $(dir $<) -i $(fajita_dts_dir) $(DTC_FLAGS) \
 +		-d $(depfile).dtc.tmp $(dtc-tmp) ; \
 +	cat $(depfile).pre.tmp $(depfile).dtc.tmp > $(depfile)
 +
