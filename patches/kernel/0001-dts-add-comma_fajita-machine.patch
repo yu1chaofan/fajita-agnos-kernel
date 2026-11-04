@@ -4,7 +4,7 @@ Subject: [PATCH] arm64: dts: qcom: add comma_fajita (OnePlus 6T) machine for AGN
 AGNOS boots ONE appended DTB (CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE) and
 comma.sh greps /sys/firmware/devicetree/base/model for "comma".  The OnePlus
 tree only ships dtbo plugin overlays over sdm845-v2.1.dtb, which cannot be
-appended.  Add a full machine DT on top of sdm845-v2.1-mtp.dtsi that reuses
+appended.  Add a full machine DT on top of sdm845-v2.1-mtp.dts that reuses
 the OnePlus panel/touch/IMU snippets verbatim and drops every Android-only
 consumer node (SPECTRA camera, sensorhub SPI bridge, fsa4480, nq-nci).
 
@@ -13,21 +13,25 @@ Applies on LineageOS/android_kernel_oneplus_sdm845@228c16b.
 diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
 --- a/arch/arm64/boot/dts/qcom/Makefile
 +++ b/arch/arm64/boot/dts/qcom/Makefile
-@@ -1,2 +1,3 @@
+@@ -5,6 +5,7 @@
+ dtb-$(CONFIG_ARCH_SDM845) += comma_tizi.dtb
+ dtb-$(CONFIG_ARCH_SDM845) += comma_mici.dtb
+ dtb-$(CONFIG_ARCH_SDM845) += comma_ultimate_provisioning.dtb
 +dtb-$(CONFIG_ARCH_SDM845) += comma_fajita.dtb
- dtb-$(CONFIG_ARCH_SDM845) += sdm845-mtp.dtb
- dtb-$(CONFIG_ARCH_SDM845) += sdm845-cdp.dtb
+ 
+ always		:= $(dtb-y)
+ subdir-y	:= $(dts-dirs)
 diff --git a/arch/arm64/boot/dts/qcom/comma_fajita.dts b/arch/arm64/boot/dts/qcom/comma_fajita.dts
 new file mode 100644
 --- /dev/null
 +++ b/arch/arm64/boot/dts/qcom/comma_fajita.dts
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,221 @@
 +/*
 + * comma_fajita.dts - AGNOS (Ubuntu 24.04 / systemd 255) device tree for
 + *                    OnePlus 6T (fajita, SDM845 v2.1).
 + *
 + * Base: LineageOS/android_kernel_oneplus_sdm845@228c16b
-+ *       arch/arm64/boot/dts/qcom/sdm845-mtp.dtsi  (full machine, not the
++ *       arch/arm64/boot/dts/qcom/sdm845-v2.1-mtp.dts  (full machine, not the
 + *       dtbo plugin path: AGNOS needs an APPENDED DTB, see
 + *       CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE).
 + *
@@ -42,7 +46,13 @@ new file mode 100644
 +
 +/dts-v1/;
 +
-+#include "sdm845-v2.1-mtp.dtsi"
++#include "sdm845-v2.1-mtp.dts"
++/* The MTP machine references &ext_5v_boost (pmi8998 vbus) but the label only
++ * exists in the PMIC/pinctrl overlays, which upstream pulls in per-dtbo.  A
++ * single appended DTB has to carry them itself, after mtp.dtsi so the
++ * &vendor-nested regulator exists before any reference resolves. */
++#include "sdm845-pmic-overlay.dtsi"
++#include "sdm845-pinctrl-overlay.dtsi"
 +
 +/ {
 +	model = "comma fajita";

@@ -45,6 +45,7 @@ mkdir -p "$DTS_DST" "$CFG_DST"
 
 # copy only what comma_fajita.dts actually includes, plus the panel DTIs
 for f in \
+  sdm845-v2.1-mtp.dts \
   dsi-panel-samsung_s6e3fc2x01.dtsi \
   sdm845-sde-display.dtsi \
   sdm845-mtp.dtsi sdm845-v2-mtp.dtsi sdm845-v2.1-mtp.dtsi \
@@ -53,8 +54,15 @@ for f in \
   dsi-panel-nt35597-truly-dsc-cmd.dtsi ; do
   [ -f "$DTS_SRC/$f" ] && cp -f "$DTS_SRC/$f" "$DTS_DST/$f"
 done
-cp -f "$DTS_SRC"/sdm845*.dtsi "$DTS_DST"/ 2>/dev/null || true
-cp -f "$DTS_SRC"/dsi-panel-*.dtsi "$DTS_DST"/ 2>/dev/null || true
+# comma_fajita.dts pulls in the whole sdm845 machine include closure (59 files:
+# sdm845*, msm-*, pm8998/pmi8998/pm8005, dsi-panel-*, skeleton64).  Copy every
+# .dtsi/.dts the LineageOS qcom dir has -- blanket copy, no include list to rot.
+for ext in dtsi dts; do
+  for f in "$DTS_SRC"/*."$ext"; do
+    [ -f "$f" ] || continue
+    cp -f "$f" "$DTS_DST"/
+  done
+done
 
 # `git submodule status` reports the kernel dir as uninitialised because the
 # tree we assembled is not a real submodule checkout, so build_kernel.sh's
@@ -75,13 +83,13 @@ echo "== AGNOS patches"
 cd "$WORK/agnos"
 for p in "$PATCHES"/agnos-builder/*.patch; do
   echo "-- $(basename "$p")"
-  git apply --recount -v "$p"
+  patch -p1 -i "$p"
 done
 
 cd "$WORK/agnos/agnos-kernel-sdm845"
 for p in "$PATCHES"/kernel/*.patch; do
   echo "-- $(basename "$p")"
-  git apply --recount -v "$p"
+  patch -p1 --batch --forward -i "$p"
 done
 
 echo "== summary"

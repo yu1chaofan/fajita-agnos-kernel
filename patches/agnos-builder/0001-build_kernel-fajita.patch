@@ -10,14 +10,14 @@
 +case "$AGNOS_DEVICE" in
 +  tici|mici)
 +    DEFCONFIG=tici_defconfig
-+    AGNOS_CMDLINE="console=ttyMSM0,115200n8 isolcpus=6,7 quiet loglevel=3 earlycon=msm_geni_serial,0xA84000 androidboot.hardware=qcom androidboot.console=ttyMSM0 ehci-hcd.park=3 lpm_levels.sleep_disabled=1 service_locator.enable=1 androidboot.selinux=permissive firmware_class.path=/lib/firmware/updates net.ifnames=0 dyndbg=\"\""
++    AGNOS_CMDLINE="console=ttyMSM0,115200n8 isolcpus=6,7 quiet loglevel=3 earlycon=msm_geni_serial,0xA84000 androidboot.hardware=qcom androidboot.console=ttyMSM0 ehci-hcd.park=3 lpm_levels.sleep_disabled=1 service_locator.enable=1 androidboot.selinux=permissive firmware_class.path=/firmware/image net.ifnames=0 dyndbg=\"\""
 +    ;;
 +  fajita)
 +    # OnePlus 6T (SDM845 v2.1): 0-3 Kryo385 Silver 1.8 GHz, 4-7 Kryo385 Gold 2.8 GHz.
 +    # openpilot owns 1-7 (whole Gold cluster + 3 Silver); cpu0 keeps IRQs and the
 +    # systemd/modem/net housekeeping that cannot run on an isolated CPU.
 +    DEFCONFIG=agnos_fajita_defconfig
-+    AGNOS_CMDLINE="console=ttyMSM0,115200n8 isolcpus=1-7 nohz_full=1-7 rcu_nocbs=1-7 irqaffinity=0 quiet loglevel=3 earlycon=msm_geni_serial,0xA84000 androidboot.hardware=qcom androidboot.console=ttyMSM0 lpm_levels.sleep_disabled=1 firmware_class.path=/lib/firmware/updates net.ifnames=0 dyndbg=\"\""
++    AGNOS_CMDLINE="console=ttyMSM0,115200n8 isolcpus=1-7 nohz_full=1-7 rcu_nocbs=1-7 irqaffinity=0 quiet loglevel=3 earlycon=msm_geni_serial,0xA84000 androidboot.hardware=qcom androidboot.console=ttyMSM0 lpm_levels.sleep_disabled=1 firmware_class.path=/firmware/image net.ifnames=0 dyndbg=\"\""
 +    ;;
 +  *)
 +    echo "unknown AGNOS_DEVICE=$AGNOS_DEVICE"; exit 1 ;;
@@ -34,7 +34,7 @@
 +  echo "-- First make ($DEFCONFIG) --"
 +  if [ "$AGNOS_DEVICE" = "fajita" ]; then
 +    # Merge instead of plain defconfig: AGNOS requirements ride along.
-+    arch/arm64/configs/merge_config.sh \
++    bash arch/arm64/configs/merge_config.sh \
 +      arch/arm64/configs/tici_defconfig \
 +      arch/arm64/configs/agnos_fajita.fragment \
 +      /tmp/agnos_fajita_defconfig
@@ -51,7 +51,7 @@
    $TOOLS/mkbootimg \
      --kernel Image-dtb \
      --ramdisk /dev/null \
--    --cmdline "console=ttyMSM0,115200n8 isolcpus=6,7 quiet loglevel=3 earlycon=msm_geni_serial,0xA84000 androidboot.hardware=qcom androidboot.console=ttyMSM0 ehci-hcd.park=3 lpm_levels.sleep_disabled=1 service_locator.enable=1 androidboot.selinux=permissive firmware_class.path=/lib/firmware/updates net.ifnames=0 dyndbg=\"\"" \
+-    --cmdline "console=ttyMSM0,115200n8 isolcpus=6,7 quiet loglevel=3 earlycon=msm_geni_serial,0xA84000 androidboot.hardware=qcom androidboot.console=ttyMSM0 ehci-hcd.park=3 lpm_levels.sleep_disabled=1 service_locator.enable=1 androidboot.selinux=permissive firmware_class.path=/firmware/image net.ifnames=0 dyndbg=\"\"" \
 +    --cmdline "$AGNOS_CMDLINE" \
      --pagesize 4096 \
      --base 0x80000000 \
