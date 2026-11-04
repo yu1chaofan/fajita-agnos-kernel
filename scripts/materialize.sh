@@ -43,23 +43,59 @@ DTS_DST="$WORK/agnos/agnos-kernel-sdm845/arch/arm64/boot/dts/qcom"
 CFG_DST="$WORK/agnos/agnos-kernel-sdm845/arch/arm64/configs"
 mkdir -p "$DTS_DST" "$CFG_DST"
 
-# The fajita machine DT is built from the LineageOS include closure, NOT from
-# AGNOS' dtsi set: the two trees disagree on sdm845.dtsi / sdm845-pinctrl.dtsi /
-# the PMIC overlays (AGNOS' copies are trimmed for the comma SoM and, among
-# other things, never define &ext_5v_boost that sdm845-mtp.dtsi re-enables).
-# Mixing them yields "Reference to non-existent node or label".  So keep the
-# whole LineageOS qcom dir in its own subdirectory and build comma_fajita.dts
-# from there -- dtc/cpp only search $(dir $<).
-DJT_VENDOR="$DTS_DST/fajita-vendor"
-rm -rf "$DJT_VENDOR"
-mkdir -p "$DJT_VENDOR"
+# comma_fajita.dts is built out of $DTS_DST itself (dtc/cpp only search
+# $(dir $<)), so the LineageOS include chain has to be present there.
+#
+# Do NOT overwrite what the AGNOS tree already ships: its sdm845.dtsi,
+# sdm845-pinctrl.dtsi and pmi8998.dtsi are a trimmed comma-SoM fork, and
+# comma_tizi/mici/ultimate are built from them -- replacing
+# sdm845-pinctrl.dtsi with the LineageOS copy drops som_id_default and every
+# comma DTB fails with "Reference to non-existent node or label".
+copied=0
 for ext in dtsi dts; do
   for f in "$DTS_SRC"/*."$ext"; do
     [ -f "$f" ] || continue
-    cp -f "$f" "$DJT_VENDOR"/
+    base=$(basename "$f")
+    [ -e "$DTS_DST/$base" ] && continue
+    cp -f "$f" "$DTS_DST/$base"
+    copied=$((copied + 1))
   done
 done
-echo "vendored $(ls -1 "$DJT_VENDOR" | wc -l) LineageOS DT files into fajita-vendor"
+echo "added $copied LineageOS DT files that AGNOS did not ship"
+
+# One deliberate exception: sdm845-mtp.dtsi re-enables &ext_5v_boost, and the
+# AGNOS copy of sdm845-pmic-overlay.dtsi does not declare that label.  Add the
+# regulator to the AGNOS file; it stays status="disabled" exactly like
+# upstream, so comma_tizi/mici/ultimate keep building unchanged.
+PMIC="$DTS_DST/sdm845-pmic-overlay.dtsi"
+if [ -f "$PMIC" ] && ! grep -q "ext_5v_boost" "$PMIC"; then
+  python3 - "$PMIC" <<'PYEOF'
+import sys
+p = sys.argv[1]
+src = open(p).read()
+anchor = "&pmi8998_charger {"
+block = """/* AGNOS: the pmi8998 VBUS boost that sdm845-mtp.dtsi re-enables as
+ * &ext_5v_boost.  LineageOS declares it in this file; the AGNOS copy does
+ * not, so a machine based on sdm845-mtp.dtsi would reference an undefined
+ * label.  Left disabled, exactly as upstream, so the comma DTBs are
+ * unaffected. */
+&vendor {
+\text_5v_boost: ext_5v_boost {
+\t\tstatus = "disabled";
+\t\tcompatible = "regulator-fixed";
+\t\tregulator-name = "ext_5v_boost";
+\t\tgpio = <&pmi8998_gpios 10 GPIO_ACTIVE_HIGH>;
+\t\tenable-active-high;
+\t\tregulator-enable-ramp-delay = <1600>;
+\t};
+};
+
+"""
+assert anchor in src, "pmi8998_charger anchor missing"
+open(p, "w").write(src.replace(anchor, block + anchor, 1))
+print("patched ext_5v_boost into sdm845-pmic-overlay.dtsi")
+PYEOF
+fi
 
 # `git submodule status` reports the kernel dir as uninitialised because the
 # tree we assembled is not a real submodule checkout, so build_kernel.sh's

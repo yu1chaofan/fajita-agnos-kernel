@@ -83,10 +83,13 @@ jobs:
           QCOM=agnos-kernel-sdm845/arch/arm64/boot/dts/qcom
           grep -n "comma_fajita" $QCOM/Makefile
           test -f $QCOM/comma_fajita.dts
-          # the DT include closure must be complete before the container build
-          ls $QCOM/fajita-vendor/*.dts $QCOM/fajita-vendor/*.dtsi | wc -l
-          test -f $QCOM/fajita-vendor/sdm845-v2.1-mtp.dts
-          test -f $QCOM/fajita-vendor/dsi-panel-samsung_s6e3fc2x01.dtsi
+          # the LineageOS include chain must be complete before the container build
+          test -f $QCOM/sdm845-v2.1-mtp.dts
+          test -f $QCOM/dsi-panel-samsung_s6e3fc2x01.dtsi
+          # AGNOS' own dtsi must be intact (comma_tizi/mici/ultimate depend on it)
+          grep -q "som_id_default" $QCOM/sdm845-pinctrl.dtsi
+          # and the PMIC overlay must now carry the regulator the MTP machine wants
+          grep -q "ext_5v_boost" $QCOM/sdm845-pmic-overlay.dtsi
           test -f agnos-kernel-sdm845/arch/arm64/configs/agnos_fajita.fragment
 
       - name: Extract toolchain
