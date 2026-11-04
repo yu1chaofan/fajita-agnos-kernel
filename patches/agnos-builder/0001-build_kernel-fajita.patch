@@ -56,7 +56,7 @@
      --pagesize 4096 \
      --base 0x80000000 \
      --kernel_offset 0x8000 \
-@@ -117,4 +144,9 @@
+@@ -117,4 +144,17 @@
  }
  
  # Run build_kernel in container
@@ -67,4 +67,11 @@
 +# visible inside it.  Keep the cmdline file under $DIR.
 +CMDLINE_FILE=$DIR/.agnos_cmdline
 +printf '%s' "$AGNOS_CMDLINE" > $CMDLINE_FILE
++set +e
 +docker exec -u $(id -nu) $CONTAINER_ID bash -c "set -e; export DEFCONFIG=$DEFCONFIG AGNOS_DEVICE=$AGNOS_DEVICE DIR=$DIR TOOLS=$TOOLS TMP_DIR=$TMP_DIR OUTPUT_DIR=$OUTPUT_DIR BOOT_IMG=$BOOT_IMG; $(declare -f build_kernel); AGNOS_CMDLINE=\$(cat $DIR/.agnos_cmdline); build_kernel"
++rc=$?
++set -e
++if [ $rc -ne 0 ]; then
++  echo "::error::kernel build inside the container exited $rc"
++  exit $rc
++fi

@@ -97,7 +97,8 @@ jobs:
           # repointed the submodule url at the local patched tree, so the guard
           # hits `git submodule update --init` and it resolves instantly).
           export DEFCONFIG=agnos_fajita_defconfig
-          ./build_kernel.sh
+          set -o pipefail
+          ./build_kernel.sh 2>&1 | tee build_kernel.log
           ls -l output/boot.img
 
       - name: Verify boot.img contents
