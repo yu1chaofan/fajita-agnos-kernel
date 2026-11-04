@@ -24,7 +24,9 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Kernel builds take ~40 min here; cancelling on every push threw away
+  # completed work.  Queue instead.
+  cancel-in-progress: false
 
 env:
   DEVICE: fajita
