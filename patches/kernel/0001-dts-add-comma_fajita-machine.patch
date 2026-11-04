@@ -8,24 +8,43 @@ appended.  Add a full machine DT on top of sdm845-v2.1-mtp.dts that reuses
 the OnePlus panel/touch/IMU snippets verbatim and drops every Android-only
 consumer node (SPECTRA camera, sensorhub SPI bridge, fsa4480, nq-nci).
 
+The DTS is built out of its own directory (fajita-vendor/) against the
+LineageOS DT include closure.  AGNOS' dtsi files are a trimmed comma-SoM fork
+(sdm845.dtsi, sdm845-pinctrl.dtsi, pmi8998.dtsi and the PMIC overlays all
+differ) and do not carry what sdm845-mtp.dtsi needs -- notably the
+&ext_5v_boost regulator.  Since dtc/cpp only search $(dir $<), keeping the
+closure in one directory is enough; AGNOS' own dtsi files stay untouched so
+comma_tizi/mici/ultimate keep building.
+
 Applies on LineageOS/android_kernel_oneplus_sdm845@228c16b.
 
 diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
 --- a/arch/arm64/boot/dts/qcom/Makefile
 +++ b/arch/arm64/boot/dts/qcom/Makefile
-@@ -5,6 +5,7 @@
+@@ -5,7 +5,8 @@
  dtb-$(CONFIG_ARCH_SDM845) += comma_tizi.dtb
  dtb-$(CONFIG_ARCH_SDM845) += comma_mici.dtb
  dtb-$(CONFIG_ARCH_SDM845) += comma_ultimate_provisioning.dtb
-+dtb-$(CONFIG_ARCH_SDM845) += comma_fajita.dtb
  
  always		:= $(dtb-y)
  subdir-y	:= $(dts-dirs)
-diff --git a/arch/arm64/boot/dts/qcom/comma_fajita.dts b/arch/arm64/boot/dts/qcom/comma_fajita.dts
++dts-dirs	+= fajita-vendor
+ clean-files	:= *.dtb
+diff --git a/arch/arm64/boot/dts/qcom/fajita-vendor/Makefile b/arch/arm64/boot/dts/qcom/fajita-vendor/Makefile
 new file mode 100644
 --- /dev/null
-+++ b/arch/arm64/boot/dts/qcom/comma_fajita.dts
-@@ -0,0 +1,221 @@
++++ b/arch/arm64/boot/dts/qcom/fajita-vendor/Makefile
+@@ -0,0 +1,5 @@
++dtb-$(CONFIG_ARCH_SDM845) += comma_fajita.dtb
++
++always		:= $(dtb-y)
++subdir-y	:= $(dts-dirs)
++clean-files	:= *.dtb
+diff --git a/arch/arm64/boot/dts/qcom/fajita-vendor/comma_fajita.dts b/arch/arm64/boot/dts/qcom/fajita-vendor/comma_fajita.dts
+new file mode 100644
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/fajita-vendor/comma_fajita.dts
+@@ -0,0 +1,222 @@
 +/*
 + * comma_fajita.dts - AGNOS (Ubuntu 24.04 / systemd 255) device tree for
 + *                    OnePlus 6T (fajita, SDM845 v2.1).
@@ -47,12 +66,6 @@ new file mode 100644
 +/dts-v1/;
 +
 +#include "sdm845-v2.1-mtp.dts"
-+/* The MTP machine references &ext_5v_boost (pmi8998 vbus) but the label only
-+ * exists in the PMIC/pinctrl overlays, which upstream pulls in per-dtbo.  A
-+ * single appended DTB has to carry them itself, after mtp.dtsi so the
-+ * &vendor-nested regulator exists before any reference resolves. */
-+#include "sdm845-pmic-overlay.dtsi"
-+#include "sdm845-pinctrl-overlay.dtsi"
 +
 +/ {
 +	model = "comma fajita";
@@ -61,6 +74,13 @@ new file mode 100644
 +	/* 0x1801=0x18801>>3 is the OnePlus project id; board-id keeps the
 +	 * bootloader happy when it re-checks the DTB it just loaded. */
 +	qcom,board-id = <8 0>;
++
++	/* sdm845-mtp.dtsi re-enables &ext_5v_boost (the pmi8998 VBUS boost the
++	 * MTP machine drives through pmi8998 gpio10).  The LineageOS PMIC overlay
++	 * defines it, but the AGNOS tree's copy of that file does not, and we must
++	 * not overwrite AGNOS' dtsi set (its sdm845-pinctrl.dtsi carries the comma
++	 * board pins).  Define the regulator here instead, in the same place the
++	 * overlay would have put it. */
 +};
 +
 +/* ---------------- display: Samsung s6e3fc2x01, 1080x2340 ---------------- */

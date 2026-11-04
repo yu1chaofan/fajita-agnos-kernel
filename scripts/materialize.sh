@@ -43,26 +43,23 @@ DTS_DST="$WORK/agnos/agnos-kernel-sdm845/arch/arm64/boot/dts/qcom"
 CFG_DST="$WORK/agnos/agnos-kernel-sdm845/arch/arm64/configs"
 mkdir -p "$DTS_DST" "$CFG_DST"
 
-# copy only what comma_fajita.dts actually includes, plus the panel DTIs
-for f in \
-  sdm845-v2.1-mtp.dts \
-  dsi-panel-samsung_s6e3fc2x01.dtsi \
-  sdm845-sde-display.dtsi \
-  sdm845-mtp.dtsi sdm845-v2-mtp.dtsi sdm845-v2.1-mtp.dtsi \
-  sdm845-pmic-overlay.dtsi sdm845-pinctrl-overlay.dtsi \
-  sdm845-camera-sensor-mtp.dtsi \
-  dsi-panel-nt35597-truly-dsc-cmd.dtsi ; do
-  [ -f "$DTS_SRC/$f" ] && cp -f "$DTS_SRC/$f" "$DTS_DST/$f"
-done
-# comma_fajita.dts pulls in the whole sdm845 machine include closure (59 files:
-# sdm845*, msm-*, pm8998/pmi8998/pm8005, dsi-panel-*, skeleton64).  Copy every
-# .dtsi/.dts the LineageOS qcom dir has -- blanket copy, no include list to rot.
+# The fajita machine DT is built from the LineageOS include closure, NOT from
+# AGNOS' dtsi set: the two trees disagree on sdm845.dtsi / sdm845-pinctrl.dtsi /
+# the PMIC overlays (AGNOS' copies are trimmed for the comma SoM and, among
+# other things, never define &ext_5v_boost that sdm845-mtp.dtsi re-enables).
+# Mixing them yields "Reference to non-existent node or label".  So keep the
+# whole LineageOS qcom dir in its own subdirectory and build comma_fajita.dts
+# from there -- dtc/cpp only search $(dir $<).
+DJT_VENDOR="$DTS_DST/fajita-vendor"
+rm -rf "$DJT_VENDOR"
+mkdir -p "$DJT_VENDOR"
 for ext in dtsi dts; do
   for f in "$DTS_SRC"/*."$ext"; do
     [ -f "$f" ] || continue
-    cp -f "$f" "$DTS_DST"/
+    cp -f "$f" "$DJT_VENDOR"/
   done
 done
+echo "vendored $(ls -1 "$DJT_VENDOR" | wc -l) LineageOS DT files into fajita-vendor"
 
 # `git submodule status` reports the kernel dir as uninitialised because the
 # tree we assembled is not a real submodule checkout, so build_kernel.sh's
@@ -95,4 +92,4 @@ done
 echo "== summary"
 git -C "$WORK/agnos" --no-pager log --oneline -1
 git -C "$WORK/agnos/agnos-kernel-sdm845" --no-pager log --oneline -1
-ls -1 "$CFG_DST"/agnos_fajita.fragment "$DTS_DST"/comma_fajita.dts
+ls -1 "$CFG_DST"/agnos_fajita.fragment "$DTS_DST"/fajita-vendor/comma_fajita.dts
