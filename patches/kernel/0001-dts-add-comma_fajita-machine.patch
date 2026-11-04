@@ -8,42 +8,54 @@ appended.  Add a full machine DT on top of sdm845-v2.1-mtp.dts that reuses
 the OnePlus panel/touch/IMU snippets verbatim and drops every Android-only
 consumer node (SPECTRA camera, sensorhub SPI bridge, fsa4480, nq-nci).
 
-The DTS is built out of its own directory (fajita-vendor/) against the
-LineageOS DT include closure.  AGNOS' dtsi files are a trimmed comma-SoM fork
-(sdm845.dtsi, sdm845-pinctrl.dtsi, pmi8998.dtsi and the PMIC overlays all
-differ) and do not carry what sdm845-mtp.dtsi needs -- notably the
-&ext_5v_boost regulator.  Since dtc/cpp only search $(dir $<), keeping the
-closure in one directory is enough; AGNOS' own dtsi files stay untouched so
-comma_tizi/mici/ultimate keep building.
+comma_fajita.dts is built against the LineageOS DT include closure: AGNOS'
+dtsi files are a trimmed comma-SoM fork (sdm845.dtsi, sdm845-pinctrl.dtsi,
+pmi8998.dtsi and the PMIC overlays all differ) and do not carry what
+sdm845-mtp.dtsi needs, notably the &ext_5v_boost regulator.  materialize.sh
+vendors that closure into fajita-vendor/ and this Makefile adds an explicit
+rule for the one target, because Makefile.lib's dtc_cpp_flags carries no
+cppflags-y and only searches $(dir $<).  AGNOS' own dtsi files stay
+untouched, so comma_tizi/mici/ultimate keep building.
 
 Applies on LineageOS/android_kernel_oneplus_sdm845@228c16b.
 
 diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
 --- a/arch/arm64/boot/dts/qcom/Makefile
 +++ b/arch/arm64/boot/dts/qcom/Makefile
-@@ -5,7 +5,8 @@
+@@ -5,7 +5,22 @@
  dtb-$(CONFIG_ARCH_SDM845) += comma_tizi.dtb
  dtb-$(CONFIG_ARCH_SDM845) += comma_mici.dtb
  dtb-$(CONFIG_ARCH_SDM845) += comma_ultimate_provisioning.dtb
++dtb-$(CONFIG_ARCH_SDM845) += comma_fajita.dtb
++
++# comma_fajita.dts includes the LineageOS DT closure vendored in fajita-vendor/
++# (AGNOS' trimmed dtsi set does not define what sdm845-mtp.dtsi references).
++# The generic rule in scripts/Makefile.lib only searches -i $(dir $<) and
++# dtc_cpp_flags ignores cppflags-y, so give this target its own recipe.
++quiet_cmd_dtc_fajita = DTC     $@
++cmd_dtc_fajita = mkdir -p $(dir $(dtc-tmp)) ; \
++	$(CPP) $(dtc_cpp_flags) -I$(src)/fajita-vendor -x assembler-with-cpp -o $(dtc-tmp) $< ; \
++	$(DTC) -O dtb -o $@ -b 0 -i $(dir $<) -i $(src)/fajita-vendor $(DTC_FLAGS) \
++		-d $(depfile).dtc.tmp $(dtc-tmp) ; \
++	cat $(depfile).pre.tmp $(depfile).dtc.tmp > $(depfile)
++
++$(obj)/comma_fajita.dtb: $(src)/comma_fajita.dts FORCE
++	$(call if_changed_dep,dtc_fajita)
  
  always		:= $(dtb-y)
  subdir-y	:= $(dts-dirs)
-+dts-dirs	+= fajita-vendor
  clean-files	:= *.dtb
-diff --git a/arch/arm64/boot/dts/qcom/fajita-vendor/Makefile b/arch/arm64/boot/dts/qcom/fajita-vendor/Makefile
+diff --git a/arch/arm64/boot/dts/qcom/fajita-vendor/.gitkeep b/arch/arm64/boot/dts/qcom/fajita-vendor/.gitkeep
 new file mode 100644
 --- /dev/null
-+++ b/arch/arm64/boot/dts/qcom/fajita-vendor/Makefile
-@@ -0,0 +1,5 @@
-+dtb-$(CONFIG_ARCH_SDM845) += comma_fajita.dtb
-+
-+always		:= $(dtb-y)
-+subdir-y	:= $(dts-dirs)
-+clean-files	:= *.dtb
-diff --git a/arch/arm64/boot/dts/qcom/fajita-vendor/comma_fajita.dts b/arch/arm64/boot/dts/qcom/fajita-vendor/comma_fajita.dts
++++ b/arch/arm64/boot/dts/qcom/fajita-vendor/.gitkeep
+@@ -0,0 +1,2 @@
++# scripts/materialize.sh fills this directory with the LineageOS DT include
++# closure that comma_fajita.dts is compiled against.
+diff --git a/arch/arm64/boot/dts/qcom/comma_fajita.dts b/arch/arm64/boot/dts/qcom/comma_fajita.dts
 new file mode 100644
 --- /dev/null
-+++ b/arch/arm64/boot/dts/qcom/fajita-vendor/comma_fajita.dts
++++ b/arch/arm64/boot/dts/qcom/comma_fajita.dts
 @@ -0,0 +1,222 @@
 +/*
 + * comma_fajita.dts - AGNOS (Ubuntu 24.04 / systemd 255) device tree for

@@ -81,9 +81,8 @@ jobs:
           cd agnos
           ls -d agnos-kernel-sdm845 tools vble-qti.key Dockerfile.builder
           QCOM=agnos-kernel-sdm845/arch/arm64/boot/dts/qcom
-          grep -n "fajita-vendor" $QCOM/Makefile
-          grep -n "comma_fajita" $QCOM/fajita-vendor/Makefile
-          test -f $QCOM/fajita-vendor/comma_fajita.dts
+          grep -n "comma_fajita" $QCOM/Makefile
+          test -f $QCOM/comma_fajita.dts
           # the DT include closure must be complete before the container build
           ls $QCOM/fajita-vendor/*.dts $QCOM/fajita-vendor/*.dtsi | wc -l
           test -f $QCOM/fajita-vendor/sdm845-v2.1-mtp.dts

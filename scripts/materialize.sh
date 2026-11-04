@@ -92,4 +92,4 @@ done
 echo "== summary"
 git -C "$WORK/agnos" --no-pager log --oneline -1
 git -C "$WORK/agnos/agnos-kernel-sdm845" --no-pager log --oneline -1
-ls -1 "$CFG_DST"/agnos_fajita.fragment "$DTS_DST"/fajita-vendor/comma_fajita.dts
+ls -1 "$CFG_DST"/agnos_fajita.fragment "$DTS_DST"/comma_fajita.dts
