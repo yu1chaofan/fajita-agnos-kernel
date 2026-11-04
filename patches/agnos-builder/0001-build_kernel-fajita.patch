@@ -1,0 +1,68 @@
+--- a/build_kernel.sh	2026-11-04 23:34:15.477611528 +0800
++++ b/build_kernel.sh	2026-11-04 23:38:06.125433753 +0800
+@@ -1,7 +1,23 @@
+ #!/usr/bin/env bash
+ set -e
+ 
+-DEFCONFIG=tici_defconfig
++AGNOS_DEVICE="${AGNOS_DEVICE:-tici}"
++
++case "$AGNOS_DEVICE" in
++  tici|mici)
++    DEFCONFIG=tici_defconfig
++    AGNOS_CMDLINE="console=ttyMSM0,115200n8 isolcpus=6,7 quiet loglevel=3 earlycon=msm_geni_serial,0xA84000 androidboot.hardware=qcom androidboot.console=ttyMSM0 ehci-hcd.park=3 lpm_levels.sleep_disabled=1 service_locator.enable=1 androidboot.selinux=permissive firmware_class.path=/lib/firmware/updates net.ifnames=0 dyndbg=\"\""
++    ;;
++  fajita)
++    # OnePlus 6T (SDM845 v2.1): 0-3 Kryo385 Silver 1.8 GHz, 4-7 Kryo385 Gold 2.8 GHz.
++    # openpilot owns 1-7 (whole Gold cluster + 3 Silver); cpu0 keeps IRQs and the
++    # systemd/modem/net housekeeping that cannot run on an isolated CPU.
++    DEFCONFIG=agnos_fajita_defconfig
++    AGNOS_CMDLINE="console=ttyMSM0,115200n8 isolcpus=1-7 nohz_full=1-7 rcu_nocbs=1-7 irqaffinity=0 quiet loglevel=3 earlycon=msm_geni_serial,0xA84000 androidboot.hardware=qcom androidboot.console=ttyMSM0 lpm_levels.sleep_disabled=1 firmware_class.path=/lib/firmware/updates net.ifnames=0 dyndbg=\"\""
++    ;;
++  *)
++    echo "unknown AGNOS_DEVICE=$AGNOS_DEVICE"; exit 1 ;;
++esac
+ 
+ # Get directories and make sure we're in the correct spot to start the build
+ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
+@@ -74,8 +90,19 @@
+   export KCFLAGS="-w"
+ 
+   # Load defconfig and build kernel
+-  echo "-- First make --"
+-  make $DEFCONFIG O=out
++  echo "-- First make ($DEFCONFIG) --"
++  if [ "$AGNOS_DEVICE" = "fajita" ]; then
++    # Merge instead of plain defconfig: AGNOS requirements ride along.
++    arch/arm64/configs/merge_config.sh \
++      arch/arm64/configs/tici_defconfig \
++      arch/arm64/configs/agnos_fajita.fragment \
++      /tmp/agnos_fajita_defconfig
++    mkdir -p out
++    cp /tmp/agnos_fajita_defconfig out/.config
++    make O=out ARCH=arm64 olddefconfig
++  else
++    make $DEFCONFIG O=out
++  fi
+   echo "-- Second make: $(nproc --all) cores --"
+   make -j$(nproc --all) O=out  # Image-dtb
+ 
+@@ -91,7 +118,7 @@
+   $TOOLS/mkbootimg \
+     --kernel Image-dtb \
+     --ramdisk /dev/null \
+-    --cmdline "console=ttyMSM0,115200n8 isolcpus=6,7 quiet loglevel=3 earlycon=msm_geni_serial,0xA84000 androidboot.hardware=qcom androidboot.console=ttyMSM0 ehci-hcd.park=3 lpm_levels.sleep_disabled=1 service_locator.enable=1 androidboot.selinux=permissive firmware_class.path=/lib/firmware/updates net.ifnames=0 dyndbg=\"\"" \
++    --cmdline "$AGNOS_CMDLINE" \
+     --pagesize 4096 \
+     --base 0x80000000 \
+     --kernel_offset 0x8000 \
+@@ -117,4 +144,8 @@
+ }
+ 
+ # Run build_kernel in container
+-docker exec -u $(id -nu) $CONTAINER_ID bash -c "set -e; export DEFCONFIG=$DEFCONFIG DIR=$DIR TOOLS=$TOOLS TMP_DIR=$TMP_DIR OUTPUT_DIR=$OUTPUT_DIR BOOT_IMG=$BOOT_IMG; $(declare -f build_kernel); build_kernel"
++# Pass the cmdline through a file: it contains double quotes and dots that do
++# not survive another level of shell quoting.
++mkdir -p $TMP_DIR
++printf '%s' "$AGNOS_CMDLINE" > $TMP_DIR/agnos_cmdline
++docker exec -u $(id -nu) $CONTAINER_ID bash -c "set -e; export DEFCONFIG=$DEFCONFIG AGNOS_DEVICE=$AGNOS_DEVICE DIR=$DIR TOOLS=$TOOLS TMP_DIR=$TMP_DIR OUTPUT_DIR=$OUTPUT_DIR BOOT_IMG=$BOOT_IMG; $(declare -f build_kernel); AGNOS_CMDLINE=\$(cat $TMP_DIR/agnos_cmdline); build_kernel"

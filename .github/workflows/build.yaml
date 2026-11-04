@@ -1,0 +1,176 @@
+name: build-fajita-agnos
+
+# Full AGNOS-for-OnePlus-6T pipeline: comma kernel + fajita DT/config patches,
+# then comma's own Ubuntu-base rootfs, in one arm64 runner.
+# Every input is a full commit hash (see repos.lock) so runs are reproducible.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_system:
+        description: 'Also build the system image (rootfs)'
+        type: boolean
+        default: true
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/build.yaml'
+      - 'patches/**'
+      - 'scripts/**'
+      - 'repos.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEVICE: fajita
+  AGNOS_DEVICE: fajita
+  AGNOS_BUILDER_COMMIT: 3c3390f39f9985784b406d1dc37420c1a175915c
+  AGNOS_KERNEL_COMMIT: 8b0e4d289b246a5cc1b0484b25a3f9f8d4772544
+  LINEAGE_KERNEL_COMMIT: 228c16bfcd256a546e3fde375215f6072135588f
+
+jobs:
+  build:
+    name: kernel + system
+    # native arm64: the kernel is arm64 and build_system.sh cross-builds via
+    # docker buildkit for linux/arm64 anyway, so one arch covers both.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout build repo
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Runner info
+        run: |
+          echo "arch=$(uname -m) cores=$(nproc)"
+          free -h | head -2; df -h /
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev ccache \
+            rsync cpio kmod lz4 zstd openssl device-tree-compiler \
+            python3 unzip android-sdk-libsparse-utils e2fsprogs git-lfs
+          docker version --format '{{.Server.Version}}'
+          docker buildx version
+
+      - name: Materialize pinned sources + apply patches
+        run: ./scripts/materialize.sh
+
+      - name: Cache ccache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: agnos/.ccache
+          key: ccache-fajita-${{ env.AGNOS_KERNEL_COMMIT }}-${{ hashFiles('patches/**') }}
+          restore-keys: |
+            ccache-fajita-${{ env.AGNOS_KERNEL_COMMIT }}-
+            ccache-fajita-
+
+      - name: Stage kernel tree for the container build
+        # build_kernel.sh builds inside Dockerfile.builder and bind-mounts
+        # $DIR, so the tree must live under the workspace, which it does.
+        run: |
+          cd agnos
+          ls -d agnos-kernel-sdm845 tools vble-qti.key Dockerfile.builder
+          grep -n "comma_fajita" agnos-kernel-sdm845/arch/arm64/boot/dts/qcom/Makefile
+          test -f agnos-kernel-sdm845/arch/arm64/configs/agnos_fajita.fragment
+
+      - name: Extract toolchain
+        run: |
+          git lfs install --skip-repo
+          cd agnos && ./tools/extract_tools.sh
+
+      - name: Build kernel + boot.img
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/agnos/.ccache
+          CCACHE_MAXSIZE: 6G
+          AGNOS_DEVICE: fajita
+        run: |
+          cd agnos
+          # build_kernel.sh stays untouched in its submodule guard (materialize.sh
+          # repointed the submodule url at the local patched tree, so the guard
+          # hits `git submodule update --init` and it resolves instantly).
+          export DEFCONFIG=agnos_fajita_defconfig
+          ./build_kernel.sh
+          ls -l output/boot.img
+
+      - name: Verify boot.img contents
+        run: |
+          set -e
+          cd agnos
+          ls -l output/
+          # the appended DTB must contain the comma model string comma.sh greps
+          fdtget -l output/boot.img 2>/dev/null || true
+          strings -n 8 output/boot.img | grep -m3 -E "comma fajita|comma_tizi" || {
+            echo "::error::DTB model string missing from boot.img"; exit 1; }
+          # cmdline is stored as an ASCII block in the header
+          strings -n 8 output/boot.img | grep -m1 "isolcpus=1-7" || {
+            echo "::error::cmdline not embedded"; exit 1; }
+          ls -l output/linux-headers >/dev/null
+
+      - name: Build system image (rootfs)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_system || github.event_name == 'push' }}
+        env:
+          GIT_HASH: ${{ github.sha }}
+        run: |
+          cd agnos
+          ./build_system.sh
+          ls -l output/system.img
+          # AGNOS rootfs sanity: systemd + comma.service must be inside
+          debugfs -R "stat /etc/systemd/system/comma.service" output/system.img 2>&1 | head -3
+          debugfs -R "stat /VERSION" output/system.img 2>&1 | head -3
+
+      - name: Post-build evidence
+        run: |
+          set -e
+          cd agnos
+          mkdir -p ../artifacts
+          cp output/boot.img ../artifacts/ || true
+          [ -f output/system.img ] && cp output/system.img ../artifacts/ || true
+          cp output/linux-headers -r ../artifacts/ 2>/dev/null || true
+          (cd agnos-kernel-sdm845 && git rev-parse HEAD) > ../artifacts/KERNEL_COMMIT
+          (cd ${{ github.workspace }}/agnos && git rev-parse HEAD) > ../artifacts/AGNOS_BUILDER_COMMIT
+          uname -a > ../artifacts/RUNNER
+          cat output/boot.img.log 2>/dev/null || true
+          cd ../artifacts
+          sha256sum * > SHA256SUMS.txt || true
+          ls -l
+
+      - name: Upload boot.img
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fajita-boot-${{ github.run_number }}
+          path: |
+            artifacts/boot.img
+            artifacts/SHA256SUMS.txt
+            artifacts/KERNEL_COMMIT
+            artifacts/AGNOS_BUILDER_COMMIT
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload system.img
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_system || github.event_name == 'push' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fajita-system-${{ github.run_number }}
+          path: artifacts/system.img
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Collect failure logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fajita-logs-${{ github.run_number }}
+          path: |
+            agnos/**.log
+            agnos/output/**
+          if-no-files-found: ignore
+          retention-days: 7

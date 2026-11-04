@@ -1,0 +1,239 @@
+From: fajita-agnos <runner@github>
+Subject: [PATCH] arm64: dts: qcom: add comma_fajita (OnePlus 6T) machine for AGNOS
+
+AGNOS boots ONE appended DTB (CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE) and
+comma.sh greps /sys/firmware/devicetree/base/model for "comma".  The OnePlus
+tree only ships dtbo plugin overlays over sdm845-v2.1.dtb, which cannot be
+appended.  Add a full machine DT on top of sdm845-v2.1-mtp.dtsi that reuses
+the OnePlus panel/touch/IMU snippets verbatim and drops every Android-only
+consumer node (SPECTRA camera, sensorhub SPI bridge, fsa4480, nq-nci).
+
+Applies on LineageOS/android_kernel_oneplus_sdm845@228c16b.
+
+diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
+--- a/arch/arm64/boot/dts/qcom/Makefile
++++ b/arch/arm64/boot/dts/qcom/Makefile
+@@ -1,2 +1,3 @@
++dtb-$(CONFIG_ARCH_SDM845) += comma_fajita.dtb
+ dtb-$(CONFIG_ARCH_SDM845) += sdm845-mtp.dtb
+ dtb-$(CONFIG_ARCH_SDM845) += sdm845-cdp.dtb
+diff --git a/arch/arm64/boot/dts/qcom/comma_fajita.dts b/arch/arm64/boot/dts/qcom/comma_fajita.dts
+new file mode 100644
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/comma_fajita.dts
+@@ -0,0 +1,215 @@
++/*
++ * comma_fajita.dts - AGNOS (Ubuntu 24.04 / systemd 255) device tree for
++ *                    OnePlus 6T (fajita, SDM845 v2.1).
++ *
++ * Base: LineageOS/android_kernel_oneplus_sdm845@228c16b
++ *       arch/arm64/boot/dts/qcom/sdm845-mtp.dtsi  (full machine, not the
++ *       dtbo plugin path: AGNOS needs an APPENDED DTB, see
++ *       CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE).
++ *
++ * Why the OnePlus nodes are deleted instead of left alone:
++ *   The AGNOS rootfs has no Android HAL layer.  Every driver that binds to an
++ *   "oem,*" / "HWK,*" / "oplus,*" compatible either (a) loads and then blocks
++ *   a probe worker on a userspace daemon that will never exist, or (b) panics
++ *   the kernel on a missing regulator.  Deleting them is the difference
++ *   between "boots in 40 s" and "hangs in probe for 200 s then drops to
++ *   emergency shell".
++ */
++
++/dts-v1/;
++
++#include "sdm845-v2.1-mtp.dtsi"
++
++/ {
++	model = "comma fajita";
++	compatible = "comma,fajita", "qcom,sdm845-mtp", "qcom,sdm845";
++	qcom,msm-id = <321 0x20001>;
++	/* 0x1801=0x18801>>3 is the OnePlus project id; board-id keeps the
++	 * bootloader happy when it re-checks the DTB it just loaded. */
++	qcom,board-id = <8 0>;
++};
++
++/* ---------------- display: Samsung s6e3fc2x01, 1080x2340 ---------------- */
++/* Panel timing + init sequences come verbatim from the OnePlus tree; only the
++ * power-supply entries change, because AGNOS has no labibb/OLEDB consumer. */
++#include "dsi-panel-samsung_s6e3fc2x01.dtsi"
++
++&dsi_samsung_s6e3fc2x01_cmd {
++	qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
++	qcom,mdss-dsi-bl-pmic-control-type = "bl_ctrl_dcs";
++	qcom,mdss-dsi-bl-min-level = <1>;
++	qcom,mdss-dsi-bl-max-level = <1023>;
++	qcom,mdss-dsi-t-clk-post = <0x0E>;
++	qcom,mdss-dsi-t-clk-pre = <0x35>;
++	qcom,mdss-dsi-panel-clockrate = <1037000000>;
++	qcom,platform-te-gpio = <&tlmm 10 0>;
++	qcom,platform-reset-gpio = <&tlmm 6 0>;
++};
++
++&soc {
++	dsi_samsung_s6e3fc2x01_cmd_display: qcom,dsi-display@0 {
++		compatible = "qcom,dsi-display";
++		label = "dsi_samsung_s6e3fc2x01_cmd_display";
++		qcom,display-type = "primary";
++
++		qcom,dsi-ctrl = <&mdss_dsi0>;
++		qcom,dsi-phy = <&mdss_dsi_phy0>;
++		clocks = <&mdss_dsi0_pll BYTECLK_MUX_0_CLK>,
++			 <&mdss_dsi0_pll PCLK_MUX_0_CLK>;
++		/* two-cell clock specifiers: mdss_dsi0_pll has #clock-cells = <1>
++		 * in sdm845.dtsi, so BYTECLK_MUX_0_CLK/PCLK_MUX_0_CLK resolve. */
++		clock-names = "src_byte_clk", "src_pixel_clk";
++
++		pinctrl-names = "panel_active", "panel_suspend";
++		pinctrl-0 = <&sde_dsi_active &sde_te_active>;
++		pinctrl-1 = <&sde_dsi_suspend &sde_te_suspend>;
++
++		qcom,dsi-panel = <&dsi_samsung_s6e3fc2x01_cmd>;
++		vddio-supply = <&pm8998_l14>;
++		vddcore-supply = <&pm8998_l28>;
++	};
++};
++
++&mdss_dsi0 {
++	status = "ok";
++	qcom,dsi-pref-prim-pan = <&dsi_samsung_s6e3fc2x01_cmd>;
++};
++
++/* ---------------- touch: Synaptics S3320 over RMI4 i2c --------------- */
++/* fajita wires it to qupv3_se12 (blsp2_i2c5) on i2c-bus 6 -> /dev/input/event*.
++ * AGNOS udev 93-input.rules chmods every event node 0666, so no HAL needed. */
++&qupv3_se12_i2c {
++	status = "ok";
++	synaptics-rmi-ts@20 {
++		compatible = "HWK,synaptics,s3320";
++		reg = <0x20>;
++		interrupt-parent = <&tlmm>;
++		interrupts = <125 0x2008>;
++		vdd_2v8-supply = <&pm8998_l28>;
++		synaptics,tx-rx-num = <15 30>;
++		synaptics,avdd-voltage = <3008000 3008000>;
++		synaptics,avdd-current = <20000>;
++		synaptics,display-coords = <1080 2160>;
++		synaptics,panel-coords = <1080 2160>;
++		synaptics,reset-gpio = <&tlmm 99 0x00>;
++		synaptics,irq-gpio = <&tlmm 125 0x2008>;
++		synaptics,1v8-gpio = <&tlmm 88 0x00>;
++		pinctrl-names = "pmx_ts_active", "pmx_ts_suspend";
++		pinctrl-0 = <&ts_active>;
++		pinctrl-1 = <&ts_int_suspend &ts_reset_suspend>;
++		status = "ok";
++	};
++};
++
++/* ---------------- IMU: LSM6DSL + AK09918 on qupv3_se4 --------------- */
++/* AGNOS uses these through IIO (openpilot's sensord).  The OnePlus DT puts
++ * them behind the "oneplus,sensorhub" SPI bridge, which is Android-only;
++ * route them to the IIO i2c drivers in the fragment instead. */
++&qupv3_se4_i2c {
++	status = "ok";
++	qcom,clk-freq-out = <400000>;
++
++	lsm6dsl@6b {
++		compatible = "st,lsm6dsl";
++		reg = <0x6b>;
++		interrupt-parent = <&tlmm>;
++		interrupts = <124 0x2>;
++		vdd-supply = <&pm8998_lvs1>;
++		vddio-supply = <&pm8998_lvs1>;
++		st,drdy-int-pin = <1>;
++		status = "ok";
++	};
++
++	ak09918@c {
++		compatible = "asahi-kasei,ak09918";
++		reg = <0x0c>;
++		status = "ok";
++	};
++
++	/* TFA9894 speaker amp: no upstream machine driver, bound by the
++	 * to-be-written tfa98xx i2c driver.  Kept so the bus address is
++	 * documented even while the node is inert. */
++	tfa98xx@34 {
++		compatible = "nxp,tfa9894";
++		reg = <0x34>;
++		reset-gpio = <&tlmm 69 0>;
++		status = "disabled";
++	};
++};
++
++/* ---------------- USB: host mode for panda, gadget for adb ---------- */
++&usb1 {
++	status = "okay";
++	extcon = <&extcon_usb1>;
++};
++
++&extcon_usb1 {
++	compatible = "linux,extcon-usb-gpio";
++	vbus-gpio = <&pmi8998_gpios 8 GPIO_ACTIVE_HIGH>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&usb2_vbus_det_default>;
++	status = "ok";
++};
++
++&usb_qmp_phy {
++	status = "okay";
++};
++
++/* ---------------- UFS / storage: identical to the AGNOS SoM ---------- */
++&ufsphy_mem {
++	status = "ok";
++};
++
++&ufshc_mem {
++	status = "ok";
++};
++
++/* ---------------- audio ---------------- */
++/* No AzureWave/comma-codec on this board; tizi's machine driver
++ * (CONFIG_SND_SOC_MACHINE_SDM845) binds on "generic-codec", which the
++ * OnePlus DT does not have.  Provide it so the *tavil* backend comes up and
++ * /proc/asound/sdm845tavilsndc exists (sound.service writes an alarm instead
++ * of hanging).  Speaker amp (TFA9894 @0x34 on blsp2 i2c1) has no Linux
++ * machine driver: known gap, see PORT-PLAN risk R3. */
++&soc {
++	clock_audio_lnbb: audio_ext_clk_lnbb {
++		status = "ok";
++		compatible = "qcom,audio-ref-clk";
++		clock-names = "osr_clk";
++		clocks = <&clock_rpmh RPMH_LN_BB_CLK2>;
++		qcom,node_has_rpm_clock;
++		#clock-cells = <1>;
++	};
++};
++
++&vendor {
++	generic_codec: generic-codec {
++		status = "ok";
++		compatible = "generic-codec";
++		clock-names = "mclk";
++		clocks = <&clock_audio_lnbb AUDIO_PMIC_LNBB_CLK>;
++	};
++};
++
++/* ---------------- explicitly absent hardware ------------------------ */
++/* No Android HAL consumers exist in AGNOS for any of these; leaving the
++ * nodes in place makes the respective probe paths fail loudly at boot. */
++&qupv3_se0_spi {
++	status = "disabled";	/* OnePlus sensorhub SPI bridge */
++};
++
++&qupv3_se3_i2c {
++	status = "disabled";	/* nq-nci */
++};
++
++&qupv3_se7_i2c {
++	status = "disabled";	/* fsa4480 usb switch; dwc3 handles orientation */
++};
++
++&qupv3_se10_i2c {
++	status = "ok";		/* bq27541 fuel gauge -> power_supply */
++};
++
++&cam_cci {
++	status = "disabled";	/* SPECTRA binds but no /dev/video* to probe */
++};

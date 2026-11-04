@@ -1,0 +1,17 @@
+# Pinned upstream revisions.  Every build input is a full commit hash so the
+# same workflow run always produces the same bytes.
+AGNOS_BUILDER_REPO=https://github.com/commaai/agnos-builder.git
+AGNOS_BUILDER_COMMIT=3c3390f39f9985784b406d1dc37420c1a175915c
+
+AGNOS_KERNEL_REPO=https://github.com/commaai/agnos-kernel-sdm845.git
+AGNOS_KERNEL_COMMIT=8b0e4d289b246a5cc1b0484b25a3f9f8d4772544
+
+LINEAGE_KERNEL_REPO=https://github.com/LineageOS/android_kernel_oneplus_sdm845.git
+LINEAGE_KERNEL_COMMIT=228c16bfcd256a546e3fde375215f6072135588f
+
+LINEAGE_DEVICE_REPO=https://github.com/LineageOS/android_device_oneplus_fajita.git
+LINEAGE_DEVICE_COMMIT=63e45b838bb6707012f0eb8e39876c72552e3da2
+
+# rootfs inputs (already pinned inside build_system.sh by sha256)
+UBUNTU_BASE_FILE=ubuntu-base-24.04.3-base-arm64.tar.gz
+UBUNTU_BASE_SHA256=7b2dced6dd56ad5e4a813fa25c8de307b655fdabc6ea9213175a92c48dabb048

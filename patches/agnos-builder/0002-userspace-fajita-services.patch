@@ -1,0 +1,72 @@
+--- a/userspace/root/usr/comma/sound/sound_init.sh
++++ b/userspace/root/usr/comma/sound/sound_init.sh
+@@ -3,9 +3,20 @@
+ /usr/comma/sound/adsp-start.sh
+ 
+ echo "waiting for sound card to come online"
+-while [ ! -d /proc/asound/sdm845tavilsndc ] || [ "$(cat /proc/asound/card0/state 2> /dev/null)" != "ONLINE" ] ; do
++# Non-comma hardware (fajita/OnePlus 6T) may expose a different card name, or
++# none at all when no machine driver bound.  Fall back to card 0 and give up
++# after ~5 s instead of blocking sound.service forever.
++CARD=sdm845tavilsndc
++[ -d /proc/asound/$CARD ] || CARD=$(sed -n 's/^ *[0-9]* \[\([^ ]*\) *\].*/\1/p' /proc/asound/cards 2>/dev/null | head -1)
++for _ in $(seq 1 500); do
++  [ -n "$CARD" ] && [ -d /proc/asound/$CARD ] && \
++    [ "$(cat /proc/asound/card0/state 2> /dev/null)" = "ONLINE" ] && break
+   sleep 0.01
+ done
++if [ -z "$CARD" ] || [ ! -d /proc/asound/$CARD ]; then
++  echo "no sound card on $(cat /sys/firmware/devicetree/base/model 2>/dev/null), skipping audio setup"
++  exit 0
++fi
+ echo "sound card online"
+ 
+ while ! amixer -D hw:0 controls | grep -q "SEC_MI2S_RX Audio Mixer MultiMedia1"; do
+--- a/userspace/root/usr/comma/gpio.sh
++++ b/userspace/root/usr/comma/gpio.sh
+@@ -31,9 +31,17 @@
+     continue
+   fi
+ 
+-  echo $p > /sys/class/gpio/export
++  # A non-comma board has none of these SoM GPIOs; export fails and the node
++  # never appears.  Bail out after ~2 s so gpio.service cannot block boot.
++  if ! echo $p > /sys/class/gpio/export 2>/dev/null && [ ! -d /sys/class/gpio/gpio$p ]; then
++    echo "gpio $p not present on this hardware, stopping export loop"
++    exit 0
++  fi
++  tries=0
+   until [ -d /sys/class/gpio/gpio$p ]
+   do
++    tries=$((tries + 1))
++    [ $tries -gt 40 ] && { echo "gpio $p never appeared, stopping export loop"; exit 0; }
+     sleep .05
+   done
+ done
+--- a/userspace/services.sh
++++ b/userspace/services.sh
+@@ -1,7 +1,10 @@
+ #!/bin/bash -e
+ 
+-# Enable DSP services
+-systemctl enable cdsp
++# Enable DSP services.  fajita (OnePlus 6T) has no CDSP node, so enabling the
++# unit unconditionally fails the whole build step.
++if [ -e /sys/kernel/boot_cdsp/boot ]; then
++  systemctl enable cdsp
++fi
+ 
+ # Enable our services
+ systemctl enable fs_setup.service
+--- a/userspace/root/usr/comma/comma.sh
++++ b/userspace/root/usr/comma/comma.sh
+@@ -61,7 +61,8 @@
+     echo "launching system reset, reset trigger present"
+     rm -f $RESET_TRIGGER
+     $RESET
+-  elif (( "$(cat /sys/class/input/input2/device/touch_count)" > 4 )); then
++  elif [ -r /sys/class/input/input2/device/touch_count ] && \
++       [ "$(cat /sys/class/input/input2/device/touch_count 2>/dev/null || echo 0)" -gt 4 ] 2>/dev/null; then
+     echo "launching system reset, got taps"
+     $RESET --tap-reset
+   elif ! mountpoint -q /data; then
