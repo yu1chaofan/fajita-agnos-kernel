@@ -17,7 +17,7 @@
 +    # openpilot owns 1-7 (whole Gold cluster + 3 Silver); cpu0 keeps IRQs and the
 +    # systemd/modem/net housekeeping that cannot run on an isolated CPU.
 +    DEFCONFIG=agnos_fajita_defconfig
-+    AGNOS_CMDLINE="console=ttyMSM0,115200n8 isolcpus=1-7 nohz_full=1-7 rcu_nocbs=1-7 irqaffinity=0 quiet loglevel=3 earlycon=msm_geni_serial,0xA84000 androidboot.hardware=qcom androidboot.console=ttyMSM0 lpm_levels.sleep_disabled=1 firmware_class.path=/firmware/image net.ifnames=0 dyndbg=\"\""
++    AGNOS_CMDLINE="console=ttyMSM0,115200n8 isolcpus=1-7 nohz_full=1-7 rcu_nocbs=1-7 irqaffinity=0 quiet loglevel=3 earlycon=msm_geni_serial,0xA84000 androidboot.hardware=qcom androidboot.console=ttyMSM0 lpm_levels.sleep_disabled=1 firmware_class.path=/firmware/image net.ifnames=0 msm_drm.dsi_display0=dsi_samsung_s6e3fc2x01_cmd_display: dyndbg=\"\""
 +    ;;
 +  *)
 +    echo "unknown AGNOS_DEVICE=$AGNOS_DEVICE"; exit 1 ;;
