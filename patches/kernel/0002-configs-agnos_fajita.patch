@@ -136,7 +136,10 @@ new file mode 100644
 +# CONFIG_RANDOMIZE_MODULE_REGION_FULL is not set
 +# CONFIG_EFI is not set
 +CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
-+CONFIG_BUILD_ARM64_DT_OVERLAY=y
++# DT_OVERLAY exports `-@` to dtc, and this kernel tree ships a dtc that has no
++# -@ support, so the dtbs target dies on "invalid option -- '@'".  AGNOS boots
++# one appended DTB anyway -- overlays are the Android dtbo path.
++# CONFIG_BUILD_ARM64_DT_OVERLAY is not set
 +# CONFIG_CORE_DUMP_DEFAULT_ELF_HEADERS is not set
 +CONFIG_COMPAT=y
 +CONFIG_PM_WAKELOCKS=y
