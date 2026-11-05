@@ -344,7 +344,8 @@ jobs:
           # PHASE43: op.sh setup 检测到 venv 就把包装进 venv，用系统 python3 验会假红。
           # 先找出 venv 的 python（app/.venv 或 $VIRTUAL_ENV），再验 import。
           PY=python3
-          for cand in app/.venv/bin/python .venv/bin/python; do
+          # 必须存绝对路径 —— 后面的 scons 步骤会 `cd app`，相对路径会失效
+          for cand in "$PWD"/app/.venv/bin/python "$PWD"/.venv/bin/python; do
             [ -x "$cand" ] && { PY="$cand"; break; }
           done
           echo "verify interpreter: $PY"
