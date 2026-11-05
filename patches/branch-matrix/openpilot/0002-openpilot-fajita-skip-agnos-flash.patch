@@ -1,0 +1,64 @@
+# Portable fajita support, part 2: never flash comma-three AGNOS onto the OnePlus 6T.
+#
+# DEPENDENCY: apply 0001-openpilot-fajita-hardware.patch FIRST.
+#   - this patch relies on `FAJITA` being exported from
+#     openpilot/common/hardware/__init__.py, which only 0001 adds;
+#   - the fajita/hardware.py hunk is based on the file that 0001 creates.
+# Apply order:
+#   patch -p1 < 0001-openpilot-fajita-hardware.patch
+#   patch -p1 < 0002-openpilot-fajita-skip-agnos-flash.patch
+#
+# Why: /AGNOS exists on the fajita rootfs, so `if AGNOS:` in updated.py let
+# openpilot flash openpilot/system/hardware/comma/agnos.json (comma three slot
+# images) onto the phone. Evidence: /VERSION == "20.2" and launch_env.sh:18-19
+# exports AGNOS_VERSION="20.2" on this image, so today the updated.py:214
+# equality check happens to short-circuit the flash -- but any AGNOS_VERSION
+# bump or /VERSION mismatch re-arms it. The /FAJITA gate is deterministic.
+#
+diff --git a/openpilot/common/hardware/fajita/hardware.py b/openpilot/common/hardware/fajita/hardware.py
+index 88bd146..93f3ffa 100644
+--- a/openpilot/common/hardware/fajita/hardware.py
++++ b/openpilot/common/hardware/fajita/hardware.py
+@@ -119,8 +119,14 @@ class HardwareFajita(HardwareBase):
+     return DEVICE_TYPE
+ 
+   def get_os_version(self):
+-    # comma:85 reads /VERSION unguarded; guarded here, degrading to base:81 (None).
+-    return _read(VERSION_FILE).strip() or None
++    # comma:85 reads /VERSION unguarded; guarded here. base:81 returns None, but
++    # callers f-string it into a User-Agent (tici_setup.py:34, mici_setup.py:36)
++    # and compare it against a string (updated.py:209,214), so return "" instead
++    # of None. NOTE: "" does *not* suppress the AGNOS flash - launch_env.sh:18-19
++    # always exports AGNOS_VERSION (default "20.2"), so "" != "20.2" and
++    # updated.py:214 would still fall through. The guard is the /FAJITA check
++    # in updated.py (patch 0002), not this return value.
++    return _read(VERSION_FILE).strip()
+ 
+   def get_serial(self):
+     # comma:100 does get_cmdline()['androidboot.serialno'] -> KeyError when the
+diff --git a/openpilot/system/updated/updated.py b/openpilot/system/updated/updated.py
+index 2f48ed2..1ed0f12 100755
+--- a/openpilot/system/updated/updated.py
++++ b/openpilot/system/updated/updated.py
+@@ -17,7 +17,7 @@ from openpilot.common.time_helpers import system_time_valid
+ from openpilot.common.markdown import parse_markdown
+ from openpilot.common.swaglog import cloudlog
+ from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
+-from openpilot.common.hardware import AGNOS, HARDWARE
++from openpilot.common.hardware import AGNOS, FAJITA, HARDWARE
+ from openpilot.common.version import get_build_metadata
+ 
+ LOCK_FILE = os.getenv("UPDATER_LOCK_FILE", "/tmp/safe_staging_overlay.lock")
+@@ -411,7 +411,11 @@ class Updater:
+       run([lfs, "pull"] if os.path.isfile(lfs) else ["git", "lfs", "pull"], OVERLAY_MERGED)
+ 
+     # TODO: show agnos download progress
+-    if AGNOS:
++    # fajita (OnePlus 6T) runs an AGNOS-derived sdm845 base, so /AGNOS exists and
++    # AGNOS is True, but its AGNOS manifest/slots are not the comma three ones:
++    # flashing openpilot/system/hardware/comma/agnos.json there would write tici
++    # images onto the phone. Skip it; the relocatable /FAJITA marker wins.
++    if AGNOS and not FAJITA:
+       handle_agnos_update()
+ 
+     # Create the finalized, ready-to-swap update
