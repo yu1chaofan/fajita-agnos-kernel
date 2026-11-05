@@ -46,7 +46,9 @@ permissions:
 
 env:
   # branch-matrix 补丁的落盘位置（相对本仓库根）
-  PATCH_ROOT: patches/branch-matrix
+  # PHASE41: 绝对化 —— checkout 用了 path: app，step 的 cwd 会变成 .../app，
+  # 相对路径会指向 app/patches/... 而那里没有补丁。
+  PATCH_ROOT: ${{ github.workspace }}/patches/branch-matrix
   # 补丁原始出处：port 仓（= 承载 phase21/phase23 的仓库）里的 phase23 目录
   # 两个自证脚本的出处（op leg 的 applied 判定依赖它们）
 
@@ -189,11 +191,11 @@ jobs:
             test -f "$GITHUB_WORKSPACE/checkers/$ck" \
               || { echo "::error::ci/checkers/$ck missing (that gate would be a no-op)"; exit 1; }
           done
-          test -f patches/branch-matrix/MANIFEST.sha256 \
+          test -f "${{ github.workspace }}/patches/branch-matrix/MANIFEST.sha256" \
             || { echo "::error::patches/branch-matrix/MANIFEST.sha256 missing (sha256 pin)"; exit 1; }
           # pin 必须覆盖本 leg 的两个补丁
-          grep -q "^[0-9a-f]\{64\}  $KEY/" patches/branch-matrix/MANIFEST.sha256 \
-            || { echo "::error::MANIFEST.sha256 has no entries for $KEY"; exit 1; }
+          grep -q "^[0-9a-f]\{64\}  ${PATCH_DIR:-$KEY}/" "${{ github.workspace }}/patches/branch-matrix/MANIFEST.sha256" \
+            || { echo "::error::MANIFEST.sha256 has no entries for ${PATCH_DIR:-$KEY}"; exit 1; }
           echo "leg=$KEY patch dir + sha256 pin present ($(ls "$DIR" | wc -l) patches)"
 
       - name: Pin submodules (reproducible)
@@ -220,7 +222,7 @@ jobs:
           # 不再从 port 仓 cp（双路径已消除）。唯一来源 + 唯一 pin。
           echo "leg=$KEY patches: $(ls "$DIR" | tr '\n' ' ')"
           # 统一的 sha256 gate：落地字节必须与 MANIFEST 一致
-          ( cd patches/branch-matrix && grep "  $KEY/" MANIFEST.sha256 | sha256sum -c - ) \
+          ( cd "${{ github.workspace }}/patches/branch-matrix" && grep "  ${PATCH_DIR:-$KEY}/" MANIFEST.sha256 | sha256sum -c - ) \
             || { echo "::error::sha256 mismatch for $KEY patches"; exit 1; }
 
       - name: Compatibility patch gate (strict applied | graceful skip)
