@@ -1,8 +1,13 @@
 name: build-fajita-agnos
 
 # Full AGNOS-for-OnePlus-6T pipeline: comma kernel + fajita DT/config patches,
-# then comma's own Ubuntu-base rootfs, in one arm64 runner.
+# then comma's own Ubuntu-base rootfs.
 # Every input is a full commit hash (see repos.lock) so runs are reproducible.
+#
+# PHASE17: the kernel/DTB build is now a matrix over the USB-host VBUS
+# variants (1..4).  Each matrix leg emits its own boot.img so the variants can
+# be flashed and compared one at a time.  The rootfs build is skipped by
+# default -- it is 30+ minutes and has nothing to do with VBUS.
 
 on:
   workflow_dispatch:
@@ -10,13 +15,18 @@ on:
       build_system:
         description: 'Also build the system image (rootfs)'
         type: boolean
-        default: true
+        default: false
+      vbus_variants:
+        description: 'VBUS variants to build, comma separated (1..4)'
+        type: string
+        default: '1,2,3,4'
   push:
     branches: [ main ]
     paths:
       - '.github/workflows/build.yaml'
       - 'patches/**'
       - 'scripts/**'
+      - 'docs/**'
       - 'repos.lock'
 
 permissions:
@@ -37,11 +47,16 @@ env:
 
 jobs:
   build:
-    name: kernel + system
+    name: kernel + dtb (vbus v${{ matrix.variant }})
     # native arm64: the kernel is arm64 and build_system.sh cross-builds via
     # docker buildkit for linux/arm64 anyway, so one arch covers both.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        # push/default -> all four variants; dispatch may narrow the list
+        variant: ${{ fromJSON(format('[{0}]', github.event.inputs.vbus_variants || '1,2,3,4')) }}
 
     steps:
       - name: Checkout build repo
@@ -49,7 +64,7 @@ jobs:
 
       - name: Runner info
         run: |
-          echo "arch=$(uname -m) cores=$(nproc)"
+          echo "arch=$(uname -m) cores=$(nproc) variant=${{ matrix.variant }}"
           free -h | head -2; df -h /
 
       - name: Install host dependencies
@@ -63,7 +78,13 @@ jobs:
           docker buildx version
 
       - name: Materialize pinned sources + apply patches
-        run: ./scripts/materialize.sh
+        env:
+          VBUS_VARIANT: ${{ matrix.variant }}
+        run: |
+          ./scripts/materialize.sh
+          # the variant block must actually be in the flattened DTS
+          grep -q "PHASE17" agnos/agnos-kernel-sdm845/arch/arm64/boot/dts/qcom/comma_fajita.dts \
+            || { echo "::error::PHASE17 variant block did not survive flattening"; exit 1; }
 
       - name: Cache ccache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -88,8 +109,10 @@ jobs:
           test -f $QCOM/dsi-panel-samsung_s6e3fc2x01.dtsi
           # AGNOS' own dtsi must be intact (comma_tizi/mici/ultimate depend on it)
           grep -q "som_id_default" $QCOM/sdm845-pinctrl.dtsi
-          # and the PMIC overlay must now carry the regulator the MTP machine wants
+          # PMIC overlay must carry the MTP regulator and the PHASE17 label
           grep -q "ext_5v_boost" $QCOM/sdm845-pmic-overlay.dtsi
+          grep -q "smb2_vbus:" $QCOM/sdm845-pmic-overlay.dtsi \
+            || { echo "::error::smb2_vbus label missing (needed by vbus_dwc3-supply)"; exit 1; }
           test -f agnos-kernel-sdm845/arch/arm64/configs/agnos_fajita.fragment
 
       - name: Extract toolchain
@@ -143,38 +166,35 @@ jobs:
             echo "::error::cmdline not embedded"; exit 1; }
           ls -l output/linux-headers >/dev/null
 
-      - name: Build system image (rootfs)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_system || github.event_name == 'push' }}
-        env:
-          GIT_HASH: ${{ github.sha }}
-        run: |
-          cd agnos
-          ./build_system.sh
-          ls -l output/system.img
-          # AGNOS rootfs sanity: systemd + comma.service must be inside
-          debugfs -R "stat /etc/systemd/system/comma.service" output/system.img 2>&1 | head -3
-          debugfs -R "stat /VERSION" output/system.img 2>&1 | head -3
-
-      - name: Verify PHASE15 USB host dr_mode in the built DTB
+      - name: Verify PHASE15 + PHASE17 DT state in the built DTB
         run: |
           set -e
           cd agnos
           DTB=$(find . -path '*boot/dts/qcom/comma_fajita.dtb' | head -1)
           echo "dtb: $DTB"
           test -n "$DTB" || { echo "::error::comma_fajita.dtb was not built"; exit 1; }
-          dtc -I dtb -O dts "$DTB" > /tmp/phase15.dts
-          echo "--- dwc3@a600000 ---"
-          grep -A 16 'dwc3@a600000 {' /tmp/phase15.dts | head -20
-          grep -A 16 'dwc3@a600000 {' /tmp/phase15.dts | grep -q 'dr_mode = "host"' \
-            && echo "PHASE15-OK: dwc3@a600000 dr_mode=host" \
-            || { echo "::error::PHASE15-FAIL: dr_mode=host missing on dwc3@a600000"; exit 1; }
-          echo "--- usb0 extcon (expect detached: 0x00 0x00 ...) ---"
-          grep -m1 -E 'extcon = <0x00 0x00' /tmp/phase15.dts \
-            && echo "PHASE15-OK: usb0 extcon detached" \
-            || echo "PHASE15-WARN: usb0 extcon still wires the PD PHY"
+          dtc -I dtb -O dts "$DTB" > /tmp/phase17.dts
+          echo "--- ssusb@a600000 (usb0) ---"
+          sed -n '/ssusb@a600000 {/,/dwc3@a600000 {/p' /tmp/phase17.dts | head -30
+          echo "--- vbus regulators ---"
+          grep -n -B2 -A12 'regulator-name = "smb2-vbus"' /tmp/phase17.dts || true
+          grep -n -A10 'usb-vbus-' /tmp/phase17.dts || true
+          python3 ../scripts/verify_dtb.py ${{ matrix.variant }} /tmp/phase17.dts
           mkdir -p ../artifacts
           cp "$DTB" ../artifacts/comma_fajita.dtb
-          dtc -I dtb -O dts "$DTB" > ../artifacts/comma_fajita.dts.txt
+          cp /tmp/phase17.dts ../artifacts/comma_fajita.dts.txt
+
+      - name: Build system image (rootfs)
+        # opt-in only: 30+ minutes, and unrelated to the USB VBUS work
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_system }}
+        env:
+          GIT_HASH: ${{ github.sha }}
+        run: |
+          cd agnos
+          ./build_system.sh
+          ls -l output/system.img
+          debugfs -R "stat /etc/systemd/system/comma.service" output/system.img 2>&1 | head -3
+          debugfs -R "stat /VERSION" output/system.img 2>&1 | head -3
 
       - name: Post-build evidence
         run: |
@@ -186,6 +206,7 @@ jobs:
           cp output/linux-headers -r ../artifacts/ 2>/dev/null || true
           (cd agnos-kernel-sdm845 && git rev-parse HEAD) > ../artifacts/KERNEL_COMMIT
           (cd ${{ github.workspace }}/agnos && git rev-parse HEAD) > ../artifacts/AGNOS_BUILDER_COMMIT
+          echo "${{ matrix.variant }}" > ../artifacts/VBUS_VARIANT
           uname -a > ../artifacts/RUNNER
           cat output/boot.img.log 2>/dev/null || true
           cd ../artifacts
@@ -195,7 +216,7 @@ jobs:
       - name: Upload boot.img
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fajita-boot-${{ github.run_number }}
+          name: fajita-boot-v${{ matrix.variant }}-${{ github.run_number }}
           path: |
             artifacts/boot.img
             artifacts/comma_fajita.dtb
@@ -203,11 +224,12 @@ jobs:
             artifacts/SHA256SUMS.txt
             artifacts/KERNEL_COMMIT
             artifacts/AGNOS_BUILDER_COMMIT
+            artifacts/VBUS_VARIANT
           if-no-files-found: error
           retention-days: 30
 
       - name: Upload system.img
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_system || github.event_name == 'push' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_system }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fajita-system-${{ github.run_number }}
@@ -220,7 +242,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: fajita-logs-${{ github.run_number }}
+          name: fajita-logs-v${{ matrix.variant }}-${{ github.run_number }}
           path: |
             agnos/**.log
             agnos/output/**
