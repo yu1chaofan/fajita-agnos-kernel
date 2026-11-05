@@ -334,7 +334,9 @@ jobs:
       - name: SCons graph resolves (no-exec)
         # `scons -n` 会完整求值 SConstruct/SConscript，但不真正编译：
         # 补丁把 arch/硬件类改错时，这一步就能抓到，比等 40 分钟编译便宜。
-        if: steps.patches.outputs.status == 'applied' && matrix.layout == 'openpilot'
+        # PHASE42: scons -n 需要完整构建环境（依赖 + 子模块），和 Build app layer 同级；
+        # 原来没挂 allow_cpu_build，导致「只要修补丁」的模式下它照样红。
+        if: steps.patches.outputs.status == 'applied' && inputs.allow_cpu_build && matrix.layout == 'openpilot'
         run: |
           set -o pipefail
           cd app

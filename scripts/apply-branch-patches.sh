@@ -88,8 +88,14 @@ fi
 apply_one "$P1"
 
 if [ -n "$P2" ]; then
-  # 0002 只有在 0001 之后才有意义（它改 0001 建的文件）
-  [ -f "$APP/$HW/fajita/hardware.py" ] || die "0002 present but $HW/fajita/hardware.py missing after 0001"
+  # 0002 只有在 0001 之后才有意义（它改 0001 建的文件）。
+  # PHASE42: 不能查 discovery 出来的 $HW —— carrot 的 0001 把 fajita/ 建在
+  # openpilot/system/hardware/，而 discovery 优先 common/hardware（那支也有
+  # 一个 __init__.py 但没有 fajita/）。改为在整棵树里找 0001 实际落地的
+  # fajita/hardware.py，并把它作为本 leg 的 HAL 根。
+  HAL=$(find "$APP" -path "*/hardware/fajita/hardware.py" -not -path "*/.git/*" | head -1)
+  [ -n "$HAL" ] || die "0002 present but no */hardware/fajita/hardware.py after 0001"
+  echo "hal root: ${HAL#"$APP"/}"
   apply_one "$P2"
 fi
 
@@ -99,6 +105,13 @@ if [ -n "$P3" ]; then
 fi
 
 # ---- landed-state asserts (layout agnostic) ---------------------------------
+# PHASE42: 断言也必须以 0001 实际落地的 HAL 根为准，不能用 discovery 的 $HW。
+HAL_ASSERT=$(find "$APP" -path "*/hardware/fajita/hardware.py" -not -path "*/.git/*" | head -1)
+if [ -n "$HAL_ASSERT" ]; then
+  HW=$(dirname "$(dirname "$HAL_ASSERT")")
+  HW=${HW#"$APP"/}
+  echo "assert root: $HW"
+fi
 grep -q "^FAJITA = os.path.isfile('/FAJITA')" "$APP/$HW/__init__.py" || die "selector missing FAJITA probe"
 grep -q "HardwareFajita" "$APP/$HW/__init__.py"                     || die "selector missing HardwareFajita"
 [ -f "$APP/$HW/fajita/hardware.py" ]                                || die "fajita/hardware.py not created"
