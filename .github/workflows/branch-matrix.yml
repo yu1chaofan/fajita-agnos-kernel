@@ -1,0 +1,374 @@
+name: branch-matrix
+
+# PHASE24 · 五分支并行矩阵（openpilot leg 从 skip 转 applied）
+#
+# 相对 PHASE22 的差异（全部可追溯）：
+#   1. `op` leg（commaai/openpilot@4b20c34e5178）现在**真的有补丁**：
+#      patches/branch-matrix/openpilot/{0001,0002} 两条，0002 依赖 0001。
+#      该 leg 的 `patch_mode: strict` → 任何一步失败都是**红 leg**，不允许
+#      graceful skip 掩盖（PHASE22 的 skip 分支是给「补丁未落盘」的 4 支用的）。
+#   2. 补丁来源单源：prepare 步骤把 phase23/hwbase/patches/ 的两条 **cp** 进
+#      patches/branch-matrix/openpilot/，随后用 checked-in 的 sha256 manifest
+#      校验（patches/branch-matrix/openpilot.sha256）。cp 保证来源是 phase23，
+#      pin 保证复制结果没被动过；两条路径（port 仓在/不在）都过同一道 pin。
+#   3. 其余四支仍 graceful skip，但 skip 依据更严：必须打印**缺哪个目录**、
+#      **缺哪个文件/几个文件**，以及上游改动表出处（phase21/api 的实测 branch
+#      文件）是否在位；不再是一句"没有补丁"。
+#   4. 所有 patch 调用带 `--no-backup-if-mismatch`，不打 `*.orig` 到源码树。
+#
+# 保留的 PHASE22 约束：
+#   * 每个分支的 submodule 必须二次 pin（父 commit 不含 submodule sha 明细）。
+#   * 构建的是 x86_64 编译验证（runner 无 Adreno 630），产物名带 `x86-checkonly`。
+#   * `HEAD == pinned commit` 当步断言：0002 的第二条 hunk 与 updated.py 的行号
+#     绑定（实测在 openpilot-jl@d48cfa73 上 hunk#1 就 FAILED），检出错了必须
+#     立刻红，不能带病往下跑。
+
+on:
+  workflow_call:
+    inputs:
+      allow_cpu_build:
+        description: '允许在 x86 runner 上做 CPU 后端编译验证（不产出设备产物）'
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      allow_cpu_build:
+        description: '允许在 x86 runner 上做 CPU 后端编译验证'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  # branch-matrix 补丁的落盘位置（相对本仓库根）
+  PATCH_ROOT: patches/branch-matrix
+  # 补丁原始出处：port 仓（= 承载 phase21/phase23 的仓库）里的 phase23 目录
+  PORT_PATCH_SRC: port/phase23/hwbase/patches
+  # 两个自证脚本的出处（op leg 的 applied 判定依赖它们）
+  CHECKER_DIR: port/phase23/hwbase
+
+jobs:
+  leg:
+    name: ${{ matrix.key }} · ${{ matrix.repo }}@${{ matrix.short }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # commit 全部为 40 位完整 sha（来自 phase21/api/*.branches.json 实测）
+          - key: op
+            repo: commaai/openpilot
+            commit: 4b20c34e51789b244d4264f47feb11011aa53cbb
+            short: 4b20c34e5178
+            base_ref: master
+            layout: openpilot        # 新布局：openpilot/ 包目录（PHASE21 §3）
+            lfs: false
+            patch_topic: OP-1..OP-5
+            # PHASE24：真补丁，严格 applied
+            patch_mode: strict
+            expected_min: 2
+            expected_patches: '0001-openpilot-fajita-hardware.patch + 0002-openpilot-fajita-skip-agnos-flash.patch (顺序固定)'
+            api_file: commaai_openpilot.branches.json
+            api_branch: master
+          - key: dp
+            repo: dragonpilot-community/dragonpilot
+            commit: 94ad85cfda64773a960d048dc11cac02d4aa86a5
+            short: 94ad85cfda64
+            base_ref: pre-build
+            layout: selfdrive        # 老布局：selfdrive/ + system/（PHASE21 §3）
+            lfs: false
+            patch_topic: DP-1..DP-5
+            patch_mode: strict
+            expected_min: 3
+            expected_patches: '0001-dragonpilot-fajita-hardware.patch + 0002-dragonpilot-skip-agnos-flash.patch + 0003-dragonpilot-runner-fallback.patch (顺序固定)'
+            api_file: dragonpilot-community_dragonpilot.branches.json
+            api_branch: pre-build
+          - key: sp
+            repo: sunnypilot/sunnypilot
+            commit: 932ff06d9316e4351d6b6b9f1dd422d5b639badf
+            short: 932ff06d9316
+            base_ref: master
+            layout: openpilot
+            lfs: false
+            patch_topic: SP-1..SP-3
+            patch_mode: strict
+            expected_min: 2
+            expected_patches: '0001-sunnypilot-fajita-hardware.patch + 0002-sunnypilot-skip-agnos-flash.patch (顺序固定)'
+            api_file: sunnypilot_master.branch.json
+            api_branch: master
+          - key: frog
+            repo: FrogAi/FrogPilot
+            commit: 8955eaae9574c2a9723f401bdbaf120bf021d08a
+            short: 8955eaae9574
+            base_ref: FrogPilot
+            layout: selfdrive        # 老布局 + Qt（PHASE21 §3）
+            lfs: true                # models/ 是 LFS 指针（PHASE21 §4.4 FP-5）
+            patch_topic: FP-1..FP-5
+            patch_mode: strict
+            expected_min: 3
+            expected_patches: '0001-frogpilot-fajita-hardware.patch + 0002-frogpilot-skip-agnos-flash.patch + 0003-frogpilot-device-aware-runner.patch (顺序固定)'
+            api_file: FrogAi_FrogPilot.branches.json
+            api_branch: FrogPilot
+          - key: carrot
+            repo: ajouatom/openpilot
+            commit: 62d9d78936715de38fc1b8b74ef7591a695ca083
+            short: 62d9d7893671
+            base_ref: carrot-wip
+            layout: openpilot
+            lfs: false
+            patch_topic: CP-1..CP-5
+            patch_mode: strict
+            expected_min: 2
+            expected_patches: '0001-carrotpilot-fajita-hardware.patch + 0002-carrotpilot-skip-agnos-flash.patch (顺序固定)'
+            api_file: ajouatom_openpilot.branches.json
+            api_branch: carrot-wip
+
+    steps:
+      - name: Checkout ${{ matrix.repo }} at pinned commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ matrix.commit }}
+          path: app
+          fetch-depth: 1
+          submodules: recursive
+          lfs: ${{ matrix.lfs }}
+          persist-credentials: false
+
+      - name: Assert HEAD == pinned commit + write leg metadata
+        # 检出错误（重定向到别的默认分支 / 打错 sha）必须当步暴露。
+        # PHASE24 加重了理由：0002 的 updated.py hunk 与行号绑定，实测在
+        # openpilot-jl@d48cfa73（另一个 fork）上 hunk#1 直接 FAILED。
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(git -C app rev-parse HEAD)
+          echo "head=$HEAD_SHA pinned=${{ matrix.commit }}"
+          test "$HEAD_SHA" = "${{ matrix.commit }}" \
+            || { echo "::error::HEAD mismatch: $HEAD_SHA != ${{ matrix.commit }}"; exit 1; }
+          {
+            echo "leg=${{ matrix.key }}"
+            echo "repo=${{ matrix.repo }}"
+            echo "commit=${{ matrix.commit }}"
+            echo "head=$HEAD_SHA"
+            echo "patch_dir=$PATCH_ROOT/${{ matrix.key }}"
+            echo "patch_mode=${{ matrix.patch_mode }}"
+            echo "patch_topic=${{ matrix.patch_topic }}"
+            echo "expected_min=${{ matrix.expected_min }}"
+            echo "expected_patches=${{ matrix.expected_patches }}"
+          } > leg-status.txt
+          cat leg-status.txt
+
+      - name: Resolve port repo (strict leg only)
+        # op leg 的 applied 判定要跑 phase23 的两个自证脚本，它们只在 port 仓里。
+        # 缺这个变量 → 当步 ::error:: 退出：这条 leg 拿不到判定就是红，不是 skip。
+        if: matrix.patch_mode == 'strict'
+        env:
+          PORT_REPO: ${{ vars.FAJITA_PORT_REPO }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PORT_REPO}" ]; then
+            echo "::error::repo variable FAJITA_PORT_REPO is not set (owner/name of the port repo carrying phase21/phase23)"
+            exit 1
+          fi
+          echo "port repo: ${PORT_REPO}"
+
+      - name: Checkout port repo (checkers + patch source)
+        if: matrix.patch_mode == 'strict'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ vars.FAJITA_PORT_REPO }}
+          path: port
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Assert checker scripts + patch sources (literal paths)
+        if: matrix.patch_mode == 'strict'
+        run: |
+          set -euo pipefail
+          KEY="${{ matrix.key }}"
+          DIR="$PATCH_ROOT/$KEY"
+          test -d "$DIR" || { echo "::error::$DIR missing (PHASE29 patch set not staged)"; exit 1; }
+          n=$(ls "$DIR"/0001-*.patch 2>/dev/null | wc -l)
+          [ "$n" -ge 1 ] || { echo "::error::$DIR has no 0001-*.patch"; exit 1; }
+          for ck in check_coverage.py check_runner_semantics.py; do
+            test -f "$GITHUB_WORKSPACE/checkers/$ck" \
+              || { echo "::error::ci/checkers/$ck missing (that gate would be a no-op)"; exit 1; }
+          done
+          test -f patches/branch-matrix/MANIFEST.sha256 \
+            || { echo "::error::patches/branch-matrix/MANIFEST.sha256 missing (sha256 pin)"; exit 1; }
+          # pin 必须覆盖本 leg 的两个补丁
+          grep -q "^[0-9a-f]\{64\}  $KEY/" patches/branch-matrix/MANIFEST.sha256 \
+            || { echo "::error::MANIFEST.sha256 has no entries for $KEY"; exit 1; }
+          echo "leg=$KEY patch dir + sha256 pin present ($(ls "$DIR" | wc -l) patches)"
+
+      - name: Pin submodules (reproducible)
+        run: |
+          set -euo pipefail
+          git -C app submodule status > submodules.lock
+          echo "--- submodules.lock ($(wc -l < submodules.lock) entries) ---"
+          cat submodules.lock
+
+      - name: prepare (branch-matrix 补丁来源：cp 自 phase23)
+        if: matrix.patch_mode == 'strict'
+        # 两条 cp 命令在这里（不是报告里的一次性手工动作），理由：
+        #   ① 补丁内容单源 —— 只有 phase23/hwbase/patches/ 是作者，matrix 目录
+        #      永远是它的拷贝，不存在"两份各自演化"；
+        #   ② 复制完立刻用 sha256 manifest 校验，拷贝被人改过就红；
+        #   ③ port 仓没被 checkout 时脚本退化为"用已提交的拷贝 + 同一道 pin"，
+        #      不会把缺源伪装成 skip（skip 只属于 graceful 分支）。
+        run: |
+          set -euo pipefail
+          KEY="${{ matrix.key }}"
+          DIR="$PATCH_ROOT/$KEY"
+          # PHASE31: 五支补丁全部提交在本仓 patches/branch-matrix/<key>/，
+          # 不再从 port 仓 cp（双路径已消除）。唯一来源 + 唯一 pin。
+          echo "leg=$KEY patches: $(ls "$DIR" | tr '\n' ' ')"
+          # 统一的 sha256 gate：落地字节必须与 MANIFEST 一致
+          ( cd patches/branch-matrix && grep "  $KEY/" MANIFEST.sha256 | sha256sum -c - ) \
+            || { echo "::error::sha256 mismatch for $KEY patches"; exit 1; }
+
+      - name: Compatibility patch gate (strict applied | graceful skip)
+        id: patches
+        # 两个分支互斥，但都写同一个 output(`status`)，下游步骤不用知道是哪个 leg。
+        run: |
+          set -euo pipefail
+          KEY="${{ matrix.key }}"
+          MODE="${{ matrix.patch_mode }}"
+          DIR="$PATCH_ROOT/$KEY"
+          EXPECTED="${{ matrix.expected_patches }}"
+          MIN="${{ matrix.expected_min }}"
+
+          echo "leg=$KEY mode=$MODE patch_dir=$DIR expected_min=$MIN expected=$EXPECTED"
+
+          if [ "$MODE" = "strict" ]; then
+            echo "--- strict: 0001->0002 顺序 dry-run/apply + 两个自证脚本 ---"
+            # 脚本内部保证：0002 不会在 0001 之前 dry-run；landed state 用 grep
+            # 断言；check_coverage.py --root app（覆盖率 + --selection 选择逻辑）
+            # 树的 2 文件切片上。任一步失败 → 非零 → 本 job 红。
+            # PHASE31: 五支统一走通用版（布局无关），op 的专用脚本已退役
+            bash "$GITHUB_WORKSPACE/scripts/apply-branch-patches.sh" \
+              --app app \
+              --patches "$DIR" \
+              --expect-commit "${{ matrix.commit }}" \
+              --label leg-status.txt
+            echo "status=applied" >> leg-status.txt
+            echo "status=applied" >> "$GITHUB_OUTPUT"
+            echo "applied_at=$(date -u +%FT%TZ)" >> leg-status.txt
+            cat leg-status.txt
+            exit 0
+          fi
+
+          # ---------------- graceful：skip 依据必须精确，不许笼统 ----------------
+          missing=()
+          if [ ! -d "$DIR" ]; then
+            missing+=("补丁目录不存在: $DIR")
+            echo "dir=$DIR exists=no"
+          else
+            shopt -s nullglob
+            P=("$DIR"/*.patch)
+            shopt -u nullglob
+            echo "dir=$DIR exists=yes found=${#P[@]} patch(es)"
+            for p in "${P[@]}"; do echo "  file: $p"; done
+            if [ "${#P[@]}" -lt "$MIN" ]; then
+              missing+=("缺补丁文件: $DIR/*.patch 只有 ${#P[@]} 个，期望 >= $MIN 个 —— $EXPECTED")
+            fi
+          fi
+
+          # 上游改动表出处（PHASE21 实测 branch 文件）在不在位，作为 skip 的交叉证据
+          API_REF="${PORT_API_DIR:-port/phase21/api}/${{ matrix.api_file }}"
+          if [ -f "$API_REF" ]; then
+            echo "upstream_ref=$API_REF exists=yes branch=${{ matrix.api_branch }}"
+            echo "upstream_ref=$API_REF (branch ${{ matrix.api_branch }})" >> leg-status.txt
+          else
+            echo "upstream_ref=$API_REF exists=no"
+            missing+=("上游实测出处缺失或 port 仓未 checkout: $API_REF")
+          fi
+
+          if [ "${#missing[@]}" -eq 0 ]; then
+            # 有补丁但这条 leg 没有 strict 处理逻辑：这说明有人加了补丁文件却没接
+            # 应用逻辑，属于接线缺陷，不能当 skip 混过去。
+            echo "::error title=leg $KEY::$DIR 下有 >= $MIN 个补丁，但 patch_mode=graceful 没有应用逻辑；请先在 branch-matrix.yml 接上 strict 门禁"
+            exit 1
+          fi
+
+          REASON=$(printf '%s ; ' "${missing[@]}"); REASON=${REASON% ; }
+          echo "::warning title=leg $KEY skipped::$REASON"
+          for m in "${missing[@]}"; do echo "  missing: $m"; done
+          {
+            echo "status=skipped"
+            echo "reason=$REASON"
+            echo "skipped_at=$(date -u +%FT%TZ)"
+          } >> leg-status.txt
+          echo "status=skipped" >> "$GITHUB_OUTPUT"
+          cat leg-status.txt
+          exit 0
+
+      - name: Install build deps
+        if: steps.patches.outputs.status == 'applied' && matrix.layout == 'openpilot'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential clang libssl-dev libffi-dev libzmq3-dev libusb-1.0-0-dev \
+            libcapnp-dev capnproto python3-dev python3-pip pkg-config
+          python3 -m pip install --upgrade pip
+          python3 -m pip install scons numpy pycapnp
+
+      - name: Python syntax gate (${{ matrix.layout }})
+        if: steps.patches.outputs.status == 'applied'
+        run: |
+          set -euo pipefail
+          test -d "app/${{ matrix.layout }}" \
+            || { echo "::error::expected layout dir app/${{ matrix.layout }} not found"; ls app; exit 1; }
+          python3 -m compileall -q "app/${{ matrix.layout }}" | tee py_compile.log
+          echo "compileall OK over app/${{ matrix.layout }}"
+
+      - name: SCons graph resolves (no-exec)
+        # `scons -n` 会完整求值 SConstruct/SConscript，但不真正编译：
+        # 补丁把 arch/硬件类改错时，这一步就能抓到，比等 40 分钟编译便宜。
+        if: steps.patches.outputs.status == 'applied' && matrix.layout == 'openpilot'
+        run: |
+          set -o pipefail
+          cd app
+          scons -n -j4 2>&1 | tail -n 40 | tee ../scons_dryrun.log
+
+      - name: Build app layer (x86 compile check)
+        if: steps.patches.outputs.status == 'applied' && inputs.allow_cpu_build && matrix.layout == 'openpilot'
+        run: |
+          set -o pipefail
+          echo "::notice::构建目标是 x86_64 编译验证，不是设备产物（runner 无 Adreno 630 / 无 /AGNOS）"
+          cd app
+          timeout 5400 scons -j"$(nproc)" 2>&1 | tee ../scons_build.log
+          find . -maxdepth 4 -name '*.so' | sort | head -50 > ../so_list.txt
+          echo "shared objects: $(wc -l < ../so_list.txt) (first 50 shown)"
+          cat ../so_list.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### leg ${{ matrix.key }} (${{ matrix.repo }}@${{ matrix.short }})"
+            echo '```'
+            cat leg-status.txt 2>/dev/null || echo "leg-status.txt missing"
+            echo '```'
+            echo "- patch_mode: \`${{ matrix.patch_mode }}\`"
+            echo "- layout: \`${{ matrix.layout }}\`"
+            echo "- patch topic: \`${{ matrix.patch_topic }}\`"
+            echo "- submodules pinned: $(wc -l < submodules.lock 2>/dev/null || echo n/a)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload leg artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: app-${{ matrix.key }}-x86-checkonly-${{ github.run_number }}
+          path: |
+            leg-status.txt
+            submodules.lock
+            scons_dryrun.log
+            scons_build.log
+            py_compile.log
+            so_list.txt
+          if-no-files-found: warn
+          retention-days: 14
