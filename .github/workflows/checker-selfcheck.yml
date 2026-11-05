@@ -1,0 +1,106 @@
+name: checker-selfcheck
+# PHASE39 · 最小真跑：不需要 vars、不需要 self-hosted runner、不需要设备。
+# 目的只是把「checkers 能在干净 ubuntu-latest 上跑通」这件事从「本地跑过」
+# 变成「GitHub 上跑过」——这是整条 CI 链唯一从没被真实验证的一环。
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'checkers/**'
+      - '.github/workflows/checker-selfcheck.yml'
+
+jobs:
+  checkers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: python version
+        run: python3 -VV
+
+      - name: checkers import cleanly (no third-party deps)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import ast, pathlib, sys
+          bad = []
+          for p in sorted(pathlib.Path("checkers").glob("*.py")):
+            tree = ast.parse(p.read_text())
+            mods = set()
+            for n in ast.walk(tree):
+              if isinstance(n, ast.Import):
+                mods |= {a.name.split(".")[0] for a in n.names}
+              elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
+                mods.add(n.module.split(".")[0])
+            third = mods - set(sys.stdlib_module_names) - {"openpilot"}
+            print(f"{p.name}: stdlib+{sorted(mods & {'openpilot'})}, third-party={sorted(third)}")
+            if third:
+              bad.append((p.name, sorted(third)))
+          if bad:
+            print(f"::error::third-party imports found: {bad}")
+            sys.exit(1)
+          PY
+
+      - name: build two synthetic trees and run both checkers
+        run: |
+          set -euo pipefail
+          W="$(mktemp -d)"
+          # 树 A：一个「已打好 0003」的 dp 形状（helpers.py 带 fallback）
+          mkdir -p "$W/dp/selfdrive/modeld"
+          cat > "$W/dp/selfdrive/modeld/helpers.py" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          MODELS_DIR = Path(__file__).resolve().parent / 'models'
+          TG_INPUT_DEVICES_PATH = MODELS_DIR / 'tg_input_devices.json'
+
+          def _default_tg_input_devices(process_name, usbgpu):
+            backend = os.getenv("DEV", "QCOM")
+            defaults = {
+              'openpilot.selfdrive.modeld.modeld': {
+                'default': {'WARP_DEV': backend, 'QUEUE_DEV': backend},
+                'usbgpu': {'WARP_DEV': backend, 'QUEUE_DEV': 'AMD'},
+              },
+              'openpilot.selfdrive.modeld.dmonitoringmodeld': {'default': {'DEV': backend}},
+            }
+            return defaults[process_name]['default' if not usbgpu else 'usbgpu']
+
+          def get_tg_input_devices(process_name, usbgpu):
+            try:
+              with open(TG_INPUT_DEVICES_PATH) as f:
+                return json.load(f)[process_name]['default' if not usbgpu else 'usbgpu']
+            except (FileNotFoundError, KeyError, ValueError):
+              return _default_tg_input_devices(process_name, usbgpu)
+          PY
+          python3 checkers/check_runner_semantics.py --root "$W/dp" || { echo "::error::dp semantics FAILED"; exit 1; }
+
+          # 树 B：一个没有 get_tg_input_devices 的空树 -> rc=2（不适用），脚本必须接受
+          mkdir -p "$W/plain/selfdrive/modeld"
+          echo "# nothing here" > "$W/plain/selfdrive/modeld/helpers.py"
+          python3 checkers/check_runner_semantics.py --root "$W/plain" > "$W/out.txt" 2>&1
+          rc=$?
+          cat "$W/out.txt"
+          if [ "$rc" -ne 2 ]; then echo "::error::expected rc=2 (not applicable), got $rc"; exit 1; fi
+
+      - name: negative control — dp tree WITHOUT the fallback must be rejected
+        run: |
+          set -euo pipefail
+          W="$(mktemp -d)"
+          mkdir -p "$W/raw/selfdrive/modeld"
+          cat > "$W/raw/selfdrive/modeld/helpers.py" <<'PY'
+          import json
+          from pathlib import Path
+
+          MODELS_DIR = Path(__file__).resolve().parent / 'models'
+          TG_INPUT_DEVICES_PATH = MODELS_DIR / 'tg_input_devices.json'
+
+          def get_tg_input_devices(process_name, usbgpu):
+            with open(TG_INPUT_DEVICES_PATH) as f:
+              return json.load(f)[process_name]['default' if not usbgpu else 'usbgpu']
+          PY
+          rc=0
+          python3 checkers/check_runner_semantics.py --root "$W/raw" || rc=$?
+          if [ "$rc" -ne 1 ]; then echo "::error::negative control expected rc=1, got $rc (the gate is blind)"; exit 1; fi
+          echo "negative control correctly rejected the unpatched tree"
