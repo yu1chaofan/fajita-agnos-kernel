@@ -168,6 +168,10 @@ jobs:
           grep -A 16 'dwc3@a600000 {' /tmp/phase15.dts | grep -q 'dr_mode = "host"' \
             && echo "PHASE15-OK: dwc3@a600000 dr_mode=host" \
             || { echo "::error::PHASE15-FAIL: dr_mode=host missing on dwc3@a600000"; exit 1; }
+          echo "--- usb0 extcon (expect detached: 0x00 0x00 ...) ---"
+          grep -m1 -E 'extcon = <0x00 0x00' /tmp/phase15.dts \
+            && echo "PHASE15-OK: usb0 extcon detached" \
+            || echo "PHASE15-WARN: usb0 extcon still wires the PD PHY"
           mkdir -p ../artifacts
           cp "$DTB" ../artifacts/comma_fajita.dtb
           dtc -I dtb -O dts "$DTB" > ../artifacts/comma_fajita.dts.txt

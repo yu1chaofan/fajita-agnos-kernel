@@ -11,7 +11,7 @@
  			interrupts = <0 133 0>;
 --- a/arch/arm64/boot/dts/qcom/comma_fajita.dts
 +++ b/arch/arm64/boot/dts/qcom/comma_fajita.dts
-@@ -220,3 +220,22 @@
+@@ -220,3 +220,36 @@
  &cam_cci {
  	status = "disabled";	/* SPECTRA binds but no /dev/video* to probe */
  };
@@ -25,12 +25,26 @@
 + *
 + * dr_mode="host" makes dwc3_msm_probe() take the "DWC3 in host only mode"
 + * branch (dwc3-msm.c: !dwc->is_drd && host_mode -> id_state=ID_GROUND), which
-+ * bypasses the extcon/PD notifier entirely and brings up xhci-hcd in the host
-+ * role at probe time.  Cost: this port can no longer be a USB device (no usb
-+ * adb / MTP / NCM gadget on it) while the property is set.
-+ * CONFIG_USB_DWC3_DUAL_ROLE=y keeps the DT dr_mode authoritative; no
-+ * CONFIG_TYPEC is required for this path.
++ * brings up xhci-hcd in the host role at probe time.  Cost: this port can no
++ * longer be a USB device (no usb adb / MTP / gadget on it).
++ * CONFIG_USB_DWC3_DUAL_ROLE=y keeps the DT dr_mode authoritative; the 4.9
++ * vendor tree has no CONFIG_TYPEC at all, and none is needed for this path.
 + */
 +&dwc3_1 {
 +	dr_mode = "host";
++};
++
++/*
++ * sdm845-pmic-overlay.dtsi wires usb0's extcon to the pmi8998 PD PHY
++ * (<&pmi8998_pdphy>, <&pmi8998_pdphy>, <&eud>).  With that in place the
++ * pdphy keeps driving dwc3_msm_id_notifier(), and any EXTCON_USB_HOST=0
++ * event (which is what the PD engine reports whenever it is not sourcing)
++ * clears the ID bit again and the OTG state machine drops out of host mode
++ * (dwc3-msm.c B_IDLE branch: !id -> A_IDLE, id -> B_IDLE/peripheral, and the
++ * gadget side is not even initialised under dr_mode=host).
++ * Detach the role inputs so the forced DWC3_ID_GROUND is sticky.  eud stays
++ * in the list (it is slot 2, harmless debug path); vbus/id become <0>.
++ */
++&usb0 {
++	extcon = <0>, <0>, <&eud>, <0>, <0>;
 +};
