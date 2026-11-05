@@ -170,7 +170,8 @@ jobs:
           # 根，而 checkout 落在 build-repo/ → 树会被建到 ./agnos/ 而不是
           # build-repo/agnos/，下面所有断言都会找不到文件。
           # 显式传 WORK，让位置与断言、与后续 build_kernel.sh 的期望一致。
-          WORK="$PWD/build-repo/agnos" ./build-repo/scripts/materialize.sh
+          # WORK 是「agnos/ 的父目录」—— materialize 内部会拼 $WORK/agnos。
+          WORK="$PWD/build-repo" ./build-repo/scripts/materialize.sh
           QCOM=build-repo/agnos/agnos-kernel-sdm845/arch/arm64/boot/dts/qcom
           # 5 个补丁落地后的可观测结果（不是"补丁命令没报错"就算过）。
           # PHASE45: 每条断言都带可读失败信息 —— 原来裸 `grep -q` 失败时 set -e
