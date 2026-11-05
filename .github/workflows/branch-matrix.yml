@@ -37,7 +37,7 @@ on:
         type: boolean
         default: true
       only_leg:
-        description: '只跑某一支（op/dp/sp/frog/carrot；留空=全部）。用于首次真跑省钱'
+        description: 'RESERVED（当前不生效）：job 级 if 不能用 matrix、step 级合并会与既有 if 冲突'
         type: string
         default: ''
 
@@ -53,8 +53,9 @@ env:
 jobs:
   leg:
     name: ${{ matrix.key }} · ${{ matrix.repo }}@${{ matrix.short }}
-    # PHASE41: only_leg 让首次真跑可以逐支验证（每个 leg 要 clone 数 GB 上游仓）
-    if: ${{ inputs.only_leg == '' || inputs.only_leg == matrix.key }}
+    # PHASE41: only_leg 让首次真跑可以逐支验证（每个 leg 要 clone 数 GB 上游仓）。
+    # 注意：job 级 if 里 matrix 尚未展开（GitHub 会 422 拒绝），所以过滤放在
+    # 第一个 step —— 非目标 leg 会启动但立刻结束，不 clone、不编译。
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
