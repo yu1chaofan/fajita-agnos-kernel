@@ -236,6 +236,19 @@ if [ -f "$FAJ_DTS" ]; then
     "$FAJ_DTS.flat" > "$FAJ_DTS.tmp" && mv "$FAJ_DTS.tmp" "$FAJ_DTS.flat"
   mv "$FAJ_DTS.flat" "$FAJ_DTS"
   echo "flattened comma_fajita.dts -> $(wc -l < "$FAJ_DTS") lines"
+
+  # cpp strips comments, so the variant marker to look for afterwards is a
+  # real property, not the /* PHASE17 */ banner.
+  case "$VBUS_VARIANT" in
+    1|2) NEEDLE="vbus_dwc3-supply" ;;
+    3)   NEEDLE="usb-vbus-boost-gpio2" ;;
+    4)   NEEDLE="usb-vbus-ctrl-gpio3" ;;
+  esac
+  if ! grep -q "$NEEDLE" "$FAJ_DTS"; then
+    echo "::error::VBUS variant $VBUS_VARIANT did not reach the flattened DTS (no '$NEEDLE')"
+    exit 1
+  fi
+  echo "PHASE17: flattened DTS carries '$NEEDLE' (variant $VBUS_VARIANT)"
 fi
 
 

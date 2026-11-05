@@ -82,9 +82,11 @@ jobs:
           VBUS_VARIANT: ${{ matrix.variant }}
         run: |
           ./scripts/materialize.sh
-          # the variant block must actually be in the flattened DTS
-          grep -q "PHASE17" agnos/agnos-kernel-sdm845/arch/arm64/boot/dts/qcom/comma_fajita.dts \
-            || { echo "::error::PHASE17 variant block did not survive flattening"; exit 1; }
+          # materialize.sh already asserts the variant-specific property; this
+          # is the independent read-back on the file that dtc will consume
+          QCOM=agnos/agnos-kernel-sdm845/arch/arm64/boot/dts/qcom
+          grep -c -E "vbus_dwc3-supply|usb-vbus-boost-gpio2|usb-vbus-ctrl-gpio3" \
+            $QCOM/comma_fajita.dts
 
       - name: Cache ccache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
