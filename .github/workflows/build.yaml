@@ -155,6 +155,22 @@ jobs:
           debugfs -R "stat /etc/systemd/system/comma.service" output/system.img 2>&1 | head -3
           debugfs -R "stat /VERSION" output/system.img 2>&1 | head -3
 
+      - name: Verify PHASE15 USB host dr_mode in the built DTB
+        run: |
+          set -e
+          cd agnos
+          DTB=$(find . -path '*boot/dts/qcom/comma_fajita.dtb' | head -1)
+          echo "dtb: $DTB"
+          test -n "$DTB" || { echo "::error::comma_fajita.dtb was not built"; exit 1; }
+          dtc -I dtb -O dts "$DTB" > /tmp/phase15.dts
+          echo "--- dwc3@a600000 ---"
+          grep -A 16 'dwc3@a600000 {' /tmp/phase15.dts | head -20
+          grep -A 16 'dwc3@a600000 {' /tmp/phase15.dts | grep -q 'dr_mode = "host"' \
+            && echo "PHASE15-OK: dwc3@a600000 dr_mode=host" \
+            || { echo "::error::PHASE15-FAIL: dr_mode=host missing on dwc3@a600000"; exit 1; }
+          cp "$DTB" ../artifacts/comma_fajita.dtb
+          dtc -I dtb -O dts "$DTB" > ../artifacts/comma_fajita.dts.txt
+
       - name: Post-build evidence
         run: |
           set -e
@@ -177,6 +193,8 @@ jobs:
           name: fajita-boot-${{ github.run_number }}
           path: |
             artifacts/boot.img
+            artifacts/comma_fajita.dtb
+            artifacts/comma_fajita.dts.txt
             artifacts/SHA256SUMS.txt
             artifacts/KERNEL_COMMIT
             artifacts/AGNOS_BUILDER_COMMIT

@@ -1,0 +1,36 @@
+--- a/arch/arm64/boot/dts/qcom/sdm845-670-usb-common.dtsi
++++ b/arch/arm64/boot/dts/qcom/sdm845-670-usb-common.dtsi
+@@ -69,7 +69,7 @@
+ 				MSM_BUS_SLAVE_IPA_CFG 0 2400>,
+ 			<MSM_BUS_MASTER_AMPSS_M0 MSM_BUS_SLAVE_USB3 0 40000>;
+ 
+-		dwc3@a600000 {
++		dwc3_1: dwc3@a600000 {
+ 			compatible = "snps,dwc3";
+ 			reg = <0x0a600000 0xcd00>;
+ 			interrupts = <0 133 0>;
+--- a/arch/arm64/boot/dts/qcom/comma_fajita.dts
++++ b/arch/arm64/boot/dts/qcom/comma_fajita.dts
+@@ -220,3 +220,22 @@
+ &cam_cci {
+ 	status = "disabled";	/* SPECTRA binds but no /dev/video* to probe */
+ };
++
++/* ---------------- PHASE15: Type-C port as USB host (panda) ----------------
++ * The primary DWC3 instance (a600000) is the only controller wired to the
++ * 6T Type-C receptacle; usb1 (a800000) has dr_mode="host" upstream but is not
++ * brought out on this board.  Left in OTG, the vendor usbpd/PD role gate
++ * refuses every data_role swap ("data_role swap not allowed: PD not in Ready
++ * state"), so xHCI never binds and there is no /dev/bus/usb.
++ *
++ * dr_mode="host" makes dwc3_msm_probe() take the "DWC3 in host only mode"
++ * branch (dwc3-msm.c: !dwc->is_drd && host_mode -> id_state=ID_GROUND), which
++ * bypasses the extcon/PD notifier entirely and brings up xhci-hcd in the host
++ * role at probe time.  Cost: this port can no longer be a USB device (no usb
++ * adb / MTP / NCM gadget on it) while the property is set.
++ * CONFIG_USB_DWC3_DUAL_ROLE=y keeps the DT dr_mode authoritative; no
++ * CONFIG_TYPEC is required for this path.
++ */
++&dwc3_1 {
++	dr_mode = "host";
++};
