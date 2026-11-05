@@ -158,6 +158,22 @@ def main() -> int:
   frog = next(root.rglob("modeld/runners/__init__.py"), None)
   dp   = next(root.rglob("modeld/helpers.py"), None)
 
+  # PHASE42: 只对「本 leg 确实打了对应 0003」的树判定。
+  # carrot 也有 modeld/helpers.py（含 get_tg_input_devices）但没打 0003 ——
+  # 拿 dp 的语义去考它必然红，那不是本 leg 的缺陷，是 checker 的适用范围没对齐。
+  # 判据：有 __default_tg_input_devices / _default_tg_input_devices 才算「打过 fallback 补丁」；
+  #       runners/__init__.py 里出现 HARDWARE/tinygrad 语义（非 int(TICI)）才算「打过 0003」。
+  if frog is not None:
+    src = frog.read_text()
+    if "USE_THNEED" in src and "int(TICI)" in src and "get_device_type" not in src:
+      print(f"[frogpilot] {frog.relative_to(root)}: 未打 0003（仍是 int(TICI) 语义），判为不适用")
+      frog = None
+  if dp is not None:
+    src = dp.read_text()
+    if "get_tg_input_devices" in src and "_default_tg_input_devices" not in src:
+      print(f"[dragonpilot] {dp.relative_to(root)}: 未打 0003（无 fallback），判为不适用")
+      dp = None
+
   ran = 0
   all_ok = True
   if frog is not None:
