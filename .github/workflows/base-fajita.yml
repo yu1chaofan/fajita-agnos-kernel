@@ -319,6 +319,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # PHASE47: 额外上传一个「小 artifact」——只含 boot.img + 清单（约 50 MB），
+      # 便于慢链路（实测 ~6 MB/min）单独取用，不必下 591 MB 的整包。
+      - name: Upload boot-only (small artifact)
+        if: always() && hashFiles('artifacts/boot.img') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: fajita-boot-only-${{ github.run_number }}
+          path: |
+            artifacts/boot.img
+            artifacts/Image.gz-dtb
+            artifacts/SHA256SUMS.txt
+            artifacts/KERNEL_COMMIT
+            artifacts/VBUS_VARIANT
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload build logs on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
