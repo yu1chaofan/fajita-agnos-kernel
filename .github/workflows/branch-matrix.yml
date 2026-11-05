@@ -64,6 +64,7 @@ jobs:
         include:
           # commit 全部为 40 位完整 sha（来自 phase21/api/*.branches.json 实测）
           - key: op
+            patch_dir: openpilot
             repo: commaai/openpilot
             commit: 4b20c34e51789b244d4264f47feb11011aa53cbb
             short: 4b20c34e5178
@@ -78,6 +79,7 @@ jobs:
             api_file: commaai_openpilot.branches.json
             api_branch: master
           - key: dp
+            patch_dir: dragonpilot
             repo: dragonpilot-community/dragonpilot
             commit: 94ad85cfda64773a960d048dc11cac02d4aa86a5
             short: 94ad85cfda64
@@ -91,6 +93,7 @@ jobs:
             api_file: dragonpilot-community_dragonpilot.branches.json
             api_branch: pre-build
           - key: sp
+            patch_dir: sunnypilot
             repo: sunnypilot/sunnypilot
             commit: 932ff06d9316e4351d6b6b9f1dd422d5b639badf
             short: 932ff06d9316
@@ -104,6 +107,7 @@ jobs:
             api_file: sunnypilot_master.branch.json
             api_branch: master
           - key: frog
+            patch_dir: frogpilot
             repo: FrogAi/FrogPilot
             commit: 8955eaae9574c2a9723f401bdbaf120bf021d08a
             short: 8955eaae9574
@@ -117,6 +121,7 @@ jobs:
             api_file: FrogAi_FrogPilot.branches.json
             api_branch: FrogPilot
           - key: carrot
+            patch_dir: carrotpilot
             repo: ajouatom/openpilot
             commit: 62d9d78936715de38fc1b8b74ef7591a695ca083
             short: 62d9d7893671
@@ -157,7 +162,7 @@ jobs:
             echo "repo=${{ matrix.repo }}"
             echo "commit=${{ matrix.commit }}"
             echo "head=$HEAD_SHA"
-            echo "patch_dir=$PATCH_ROOT/${{ matrix.key }}"
+            echo "patch_dir=$PATCH_ROOT/${{ matrix.patch_dir }}"
             echo "patch_mode=${{ matrix.patch_mode }}"
             echo "patch_topic=${{ matrix.patch_topic }}"
             echo "expected_min=${{ matrix.expected_min }}"
@@ -175,7 +180,8 @@ jobs:
         run: |
           set -euo pipefail
           KEY="${{ matrix.key }}"
-          DIR="$PATCH_ROOT/$KEY"
+          PATCH_DIR="${{ matrix.patch_dir }}"
+          DIR="$PATCH_ROOT/${PATCH_DIR:-$KEY}"
           test -d "$DIR" || { echo "::error::$DIR missing (PHASE29 patch set not staged)"; exit 1; }
           n=$(ls "$DIR"/0001-*.patch 2>/dev/null | wc -l)
           [ "$n" -ge 1 ] || { echo "::error::$DIR has no 0001-*.patch"; exit 1; }
@@ -208,7 +214,8 @@ jobs:
         run: |
           set -euo pipefail
           KEY="${{ matrix.key }}"
-          DIR="$PATCH_ROOT/$KEY"
+          PATCH_DIR="${{ matrix.patch_dir }}"
+          DIR="$PATCH_ROOT/${PATCH_DIR:-$KEY}"
           # PHASE31: 五支补丁全部提交在本仓 patches/branch-matrix/<key>/，
           # 不再从 port 仓 cp（双路径已消除）。唯一来源 + 唯一 pin。
           echo "leg=$KEY patches: $(ls "$DIR" | tr '\n' ' ')"
@@ -223,7 +230,7 @@ jobs:
           set -euo pipefail
           KEY="${{ matrix.key }}"
           MODE="${{ matrix.patch_mode }}"
-          DIR="$PATCH_ROOT/$KEY"
+          DIR="$PATCH_ROOT/${PATCH_DIR:-$KEY}"
           EXPECTED="${{ matrix.expected_patches }}"
           MIN="${{ matrix.expected_min }}"
 
