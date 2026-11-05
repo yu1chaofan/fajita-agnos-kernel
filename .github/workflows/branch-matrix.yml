@@ -36,6 +36,10 @@ on:
         description: '允许在 x86 runner 上做 CPU 后端编译验证'
         type: boolean
         default: true
+      heavy_build:
+        description: 'PHASE43: 真跑 scons/编译（需 opendbc/acados 等 6 个 pkg，耗时数十分钟）'
+        type: boolean
+        default: false
       only_leg:
         description: 'RESERVED（当前不生效）：job 级 if 不能用 matrix、step 级合并会与既有 if 冲突'
         type: string
@@ -313,14 +317,34 @@ jobs:
           exit 0
 
       - name: Install build deps
-        if: steps.patches.outputs.status == 'applied' && matrix.layout == 'openpilot'
+        # PHASE43: 挂 heavy_build —— 只为「修补丁」跑时不需要这些；真编译才装。
+        # SConstruct 顶部 import 六个 pkg（acados/capnproto/ffmpeg/json11/ncurses/zstd），
+        # 缺一个 scons 连图都求不出来。这些是 upstream .github/workflows 的安装项。
+        if: steps.patches.outputs.status == 'applied' && inputs.allow_cpu_build && inputs.heavy_build && matrix.layout == 'openpilot'
         run: |
+          set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
             build-essential clang libssl-dev libffi-dev libzmq3-dev libusb-1.0-0-dev \
-            libcapnp-dev capnproto python3-dev python3-pip pkg-config
+            libcapnp-dev capnproto python3-dev python3-pip pkg-config \
+            libncurses5-dev libzstd-dev libavformat-dev libavcodec-dev libavutil-dev \
+            libswscale-dev libjsoncpp-dev
           python3 -m pip install --upgrade pip
           python3 -m pip install scons numpy pycapnp
+          # PHASE43: 用 upstream 自己的安装入口，而不是我手写 apt 列表 ——
+          # upstream 的 CI（.github/workflows/tests.yaml）就是 `./tools/op.sh setup`，
+          # 它负责 acados/capnproto/ffmpeg/json11/ncurses/zstd 六个 pkg 的落地。
+          # 手写列表容易漏，且随上游变化而漂移。
+          if [ -x app/tools/op.sh ]; then
+            ( cd app && ./tools/op.sh setup ) || { echo "::error::./tools/op.sh setup failed"; exit 1; }
+          else
+            echo "::error::app/tools/op.sh missing (unexpected upstream layout)"
+            exit 1
+          fi
+          python3 -c "import acados; print('acados ok')" || {
+            echo "::error::acados not importable after setup; scons cannot evaluate the graph"
+            exit 1
+          }
 
       - name: Python syntax gate (${{ matrix.layout }})
         if: steps.patches.outputs.status == 'applied'
@@ -336,14 +360,14 @@ jobs:
         # 补丁把 arch/硬件类改错时，这一步就能抓到，比等 40 分钟编译便宜。
         # PHASE42: scons -n 需要完整构建环境（依赖 + 子模块），和 Build app layer 同级；
         # 原来没挂 allow_cpu_build，导致「只要修补丁」的模式下它照样红。
-        if: steps.patches.outputs.status == 'applied' && inputs.allow_cpu_build && matrix.layout == 'openpilot'
+        if: steps.patches.outputs.status == 'applied' && inputs.allow_cpu_build && inputs.heavy_build && matrix.layout == 'openpilot'
         run: |
           set -o pipefail
           cd app
           scons -n -j4 2>&1 | tail -n 40 | tee ../scons_dryrun.log
 
       - name: Build app layer (x86 compile check)
-        if: steps.patches.outputs.status == 'applied' && inputs.allow_cpu_build && matrix.layout == 'openpilot'
+        if: steps.patches.outputs.status == 'applied' && inputs.allow_cpu_build && inputs.heavy_build && matrix.layout == 'openpilot'
         run: |
           set -o pipefail
           echo "::notice::构建目标是 x86_64 编译验证，不是设备产物（runner 无 Adreno 630 / 无 /AGNOS）"
