@@ -36,6 +36,10 @@ on:
         description: '允许在 x86 runner 上做 CPU 后端编译验证'
         type: boolean
         default: true
+      only_leg:
+        description: '只跑某一支（op/dp/sp/frog/carrot；留空=全部）。用于首次真跑省钱'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -49,6 +53,8 @@ env:
 jobs:
   leg:
     name: ${{ matrix.key }} · ${{ matrix.repo }}@${{ matrix.short }}
+    # PHASE41: only_leg 让首次真跑可以逐支验证（每个 leg 要 clone 数 GB 上游仓）
+    if: ${{ inputs.only_leg == '' || inputs.only_leg == matrix.key }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
