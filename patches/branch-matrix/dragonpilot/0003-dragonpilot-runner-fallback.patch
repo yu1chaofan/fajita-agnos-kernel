@@ -1,0 +1,43 @@
+--- a/selfdrive/modeld/helpers.py
++++ b/selfdrive/modeld/helpers.py
+@@ -1,4 +1,5 @@
+ import json
++import os
+ from pathlib import Path
+ 
+ MODELS_DIR = Path(__file__).resolve().parent / 'models'
+@@ -7,9 +8,32 @@
+ USBGPU_PID = 0x0001
+ 
+ 
++def _default_tg_input_devices(process_name: str, usbgpu: bool):
++  # PHASE36: 上游 DP 没有 fallback —— models/tg_input_devices.json 缺失时直接
++  # FileNotFoundError，modeld 起不来。fajita 上这文件不一定存在（它由
++  # tg_input_devices 生成脚本产出，且是 comma 硬件调优的产物），所以必须兜底。
++  # 语义对齐 carrotpilot：DEV 环境变量优先，默认 QCOM（fajita 上 /AGNOS 存在，
++  # Adreno 630 就是 QCOM 后端）。
++  backend = os.getenv("DEV", "QCOM")
++  defaults = {
++    'openpilot.selfdrive.modeld.modeld': {
++      'default': {'WARP_DEV': backend, 'QUEUE_DEV': backend},
++      'usbgpu': {'WARP_DEV': backend, 'QUEUE_DEV': 'AMD'},
++    },
++    'openpilot.selfdrive.modeld.dmonitoringmodeld': {
++      'default': {'DEV': backend},
++    },
++  }
++  return defaults[process_name]['default' if not usbgpu else 'usbgpu']
++
++
+ def get_tg_input_devices(process_name: str, usbgpu: bool):
+-  with open(TG_INPUT_DEVICES_PATH) as f:
+-    return json.load(f)[process_name]['default' if not usbgpu else 'usbgpu']
++  try:
++    with open(TG_INPUT_DEVICES_PATH) as f:
++      return json.load(f)[process_name]['default' if not usbgpu else 'usbgpu']
++  except (FileNotFoundError, KeyError, ValueError):
++    # KeyError/ValueError 也要兜：旧格式 json 或进程名缺失同样是启动崩溃源
++    return _default_tg_input_devices(process_name, usbgpu)
+ 
+ def modeld_pkl_path(usbgpu: bool):
+   prefix = 'big_' if usbgpu else ''
