@@ -138,6 +138,16 @@ jobs:
             api_branch: carrot-wip
 
     steps:
+      # PHASE41: 先把本仓（CI 仓）checkout 到 workspace 根 —— 补丁、checker、脚本
+      # 都在本仓里；不 checkout 它们，后面所有 test -f 都会红。上游仓单独 checkout
+      # 到 app/（见下一步）。
+      - name: Checkout this repo (patches / checkers / scripts)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: .
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Checkout ${{ matrix.repo }} at pinned commit
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
