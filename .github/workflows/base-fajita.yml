@@ -113,6 +113,15 @@ jobs:
           fi
           echo "build repo: ${BUILD_REPO}"
 
+      # PHASE45: 先把「本仓」checkout 到 workspace 根 —— patches/unit/ 与
+      # checkers/ 在这里；只 checkout build-repo 的话，0003 的输入全都找不到。
+      - name: Checkout this repo (patches/unit + checkers)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: .
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Checkout build repo
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
