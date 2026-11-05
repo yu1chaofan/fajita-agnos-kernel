@@ -1,0 +1,309 @@
+name: base-fajita
+
+# PHASE22 · 共享地基 job
+#
+# 作用：从 build 仓库（repos.lock + 5 个 patch + scripts/）构建 fajita 的三件套：
+#   boot.img / 内核镜像（Image.gz-dtb）/ system.img（rootfs）
+#
+# 复现性约束：
+#   * 四个上游仓库全部用 repos.lock 里的 40 位 commit（运行时从文件读出并校验，
+#     不在 YAML 里重复硬编码一份，避免两处漂移）；
+#   * 产物一律写 sha256；
+#   * 失败时上传构建日志（不含 continue-on-error 掩盖）。
+#
+# 该 workflow 同时被 fajita-matrix.yml 以 reusable workflow 方式调用。
+#
+# PHASE24 增量（相对 PHASE22）：
+#   * 底座 5 个补丁由 build-repo/scripts/materialize.sh 打完后，再叠一条 **0003**：
+#     phase23 的 userspace perf 补丁（原文件名 0001-userspace-fajita-perf.patch，
+#     在 base job 里按 0003 排序）。它编辑 userspace/services.sh 与
+#     usr/comma/comma.sh —— 与底座 patches/agnos-builder/0002 改的是同两个文件，
+#     所以是**组合**关系：必须在 materialize.sh 之后打（实测 services.sh hunk
+#     落在 offset 3 行，patch(1) 自己吸收）。
+#   * 0003 不能放进 build-repo/patches/：下面 "Verify repos.lock and the 5 patches"
+#     断言 `find patches -name '*.patch' == 5`，那条断言是「materialize 只吃了 5 个
+#     底座补丁」的证据；塞进去就会悄悄变成 6，证据失效。因此 0003 暂存到
+#     $GITHUB_WORKSPACE/fajita-patches/。
+#   * 所有 patch 调用带 --no-backup-if-mismatch：否则 fuzzy hunk 会在源码树留
+#     *.orig，进而被 rootfs overlay 的 `cp -a` 带进 /usr/comma/perf_mode.sh.orig。
+#   * 0003 打完跑 phase23/unit/check_unit.py（26 项：unit 结构 + staging 存在性 +
+#     ExecStart 入口 + /FAJITA 门），并断言 userspace/base_setup.sh 含 `touch /FAJITA`
+#     —— 这一行是整条 fajita 链的根（units 的 ConditionPathExists、services.sh 的
+#     enable 门、openpilot 的 Fajita() 选择全key在它上面）。
+
+on:
+  workflow_call:
+    inputs:
+      build_system:
+        description: '同时构建 system.img（rootfs，约 30-40 min）'
+        type: boolean
+        default: true
+      vbus_variant:
+        description: 'PHASE17 VBUS 变体 1..4'
+        type: string
+        default: '1'
+    outputs:
+      boot_sha256:
+        description: 'boot.img 的 sha256'
+        value: ${{ jobs.base.outputs.boot_sha256 }}
+      kernel_sha256:
+        description: '内核镜像（Image.gz-dtb）的 sha256'
+        value: ${{ jobs.base.outputs.kernel_sha256 }}
+      system_sha256:
+        description: 'system.img 的 sha256'
+        value: ${{ jobs.base.outputs.system_sha256 }}
+      artifact:
+        description: '承载三件套的 artifact 名'
+        value: ${{ jobs.base.outputs.artifact }}
+  workflow_dispatch:
+    inputs:
+      build_system:
+        description: '同时构建 system.img（rootfs）'
+        type: boolean
+        default: true
+      vbus_variant:
+        description: 'PHASE17 VBUS 变体 1..4'
+        type: string
+        default: '1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: base-fajita-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DEVICE: fajita
+  AGNOS_DEVICE: fajita
+  VBUS_VARIANT: ${{ inputs.vbus_variant }}
+  # PHASE24: 0003 的暂存目录（放 build-repo 之外，见文件头理由）
+  FAJITA_PATCH_STAGE: fajita-patches
+  # port 仓里的 phase23 目录（0003 补丁源 + check_unit.py）
+  UNIT_PATCH_SRC: patches/unit/0001-userspace-fajita-perf.patch
+  UNIT_CHECKER: checkers/check_unit.py
+  # agnos-builder 检出位置（materialize.sh 的 $WORK/agnos）
+  AGNOS_TREE: build-repo/agnos
+
+jobs:
+  base:
+    name: base (boot.img + kernel + system)
+    # 内核是 arm64，build_system.sh 走 docker buildx linux/arm64；原生 arm64 runner 一步到位。
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    outputs:
+      boot_sha256: ${{ steps.hashes.outputs.boot_sha256 }}
+      kernel_sha256: ${{ steps.hashes.outputs.kernel_sha256 }}
+      system_sha256: ${{ steps.hashes.outputs.system_sha256 }}
+      artifact: ${{ steps.hashes.outputs.artifact }}
+
+    steps:
+      - name: Resolve build repo slug
+        # build 仓库的 GitHub slug 尚未固定，用仓库变量注入；未设置时立刻失败并给出改法，
+        # 不用一个猜的 slug 去 clone（TODO(缺失: build 仓库远端 slug)）。
+        env:
+          # PHASE45: build-repo 就是本仓（fajita-agnos-kernel 同时是 CI 仓与构建仓），
+          # 默认取 github.repository，只有需要外部仓时才设 vars 覆盖。
+          BUILD_REPO: ${{ vars.FAJITA_BUILD_REPO || github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUILD_REPO}" ]; then
+            echo "::error::BUILD_REPO resolved empty (set vars.FAJITA_BUILD_REPO or run from a repo context)"
+            exit 1
+          fi
+          echo "build repo: ${BUILD_REPO}"
+
+      - name: Checkout build repo
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ vars.FAJITA_BUILD_REPO || github.repository }}
+          path: build-repo
+          fetch-depth: 1
+          persist-credentials: false
+
+      # PHASE45: port 仓 checkout 已移除 —— 0003 补丁与 check_unit.py 都提交在
+      # 本仓（patches/unit/、checkers/），不再依赖外部 port 仓。
+      # 原来的两步（Resolve/Checkout port repo）只为一个本仓已有的文件服务。
+
+      - name: Runner info
+        run: |
+          echo "arch=$(uname -m) cores=$(nproc) vbus_variant=${VBUS_VARIANT}"
+          free -h | head -2; df -h /
+
+      - name: Verify repos.lock and the 5 patches
+        # ① 每个 *_COMMIT 必须是 40 位 hex（不编造 sha，运行时读文件）
+        # ② 补丁数必须是 5（2 agnos-builder + 3 kernel，Observed）
+        run: |
+          set -euo pipefail
+          cd build-repo
+          test -f repos.lock || { echo "::error::repos.lock missing"; exit 1; }
+          n=$(grep -cE '^[A-Z0-9_]+_COMMIT=[0-9a-f]{40}$' repos.lock)
+          echo "pinned commits: $n"
+          test "$n" -ge 4 || { echo "::error::expected >=4 pinned commits in repos.lock, got $n"; exit 1; }
+          bad=$(grep -E '_COMMIT=' repos.lock | grep -vE '=[0-9a-f]{40}$' || true)
+          test -z "$bad" || { echo "::error::non-40hex commit in repos.lock: $bad"; exit 1; }
+          mapfile -t P < <(find patches -name '*.patch' | sort)
+          printf '%s\n' "${P[@]}"
+          # 仍然是 5：PHASE24 的 0003 暂存在 $GITHUB_WORKSPACE/fajita-patches/，
+          # 不在 build-repo/patches/ 下，所以这条断言继续只证明「materialize 吃了 5 个底座补丁」。
+          test "${#P[@]}" -eq 5 || { echo "::error::expected 5 patches, found ${#P[@]}"; exit 1; }
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev ccache \
+            rsync cpio kmod lz4 zstd openssl device-tree-compiler \
+            python3 unzip android-sdk-libsparse-utils e2fsprogs git-lfs
+          docker version --format '{{.Server.Version}}'
+          docker buildx version
+
+      - name: Materialize pinned sources + apply the 5 patches
+        env:
+          VBUS_VARIANT: ${{ inputs.vbus_variant }}
+        run: |
+          set -euo pipefail
+          ./build-repo/scripts/materialize.sh
+          QCOM=build-repo/agnos/agnos-kernel-sdm845/arch/arm64/boot/dts/qcom
+          # 5 个补丁落地后的可观测结果（不是"补丁命令没报错"就算过）
+          test -f "$QCOM/comma_fajita.dts"
+          grep -q "comma_fajita" "$QCOM/Makefile"
+          test -f build-repo/agnos/agnos-kernel-sdm845/arch/arm64/configs/agnos_fajita.fragment
+          grep -q "smb2_vbus:" "$QCOM/sdm845-pmic-overlay.dtsi"
+          grep -c -E "vbus_dwc3-supply|usb-vbus-boost-gpio2|usb-vbus-ctrl-gpio3" "$QCOM/comma_fajita.dts"
+
+      - name: Assert 0003 inputs (patch source + checker, literal paths)
+        # 路径写死成字面量而不是全用变量：phase24/ci/validate.py 会拿这些 token
+        # 反向解析回本仓，变量拼出来的路径它看不见。
+        run: |
+          set -euo pipefail
+          for f in "$UNIT_PATCH_SRC" "$UNIT_CHECKER"; do
+            test -f "$f" || { echo "::error::$f missing (port repo not checked out at port/)"; exit 1; }
+          done
+          sha256sum "$UNIT_PATCH_SRC"
+          test -f "$AGNOS_TREE/userspace/base_setup.sh" \
+            || { echo "::error::$AGNOS_TREE/userspace/base_setup.sh missing: materialize.sh did not produce the agnos-builder tree"; exit 1; }
+
+      - name: Apply 0003 userspace fajita perf (composed after the 5 底座 patches)
+        # 内容：patch 链（dry-run→apply，0001->0003 单调序）、landed-state 断言、
+        # `touch /FAJITA` 断言、check_unit.py。任一失败即红。
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/scripts/apply-base-extra-patch.sh" \
+            --tree "$AGNOS_TREE" \
+            --src "$UNIT_PATCH_SRC" \
+            --stage "$FAJITA_PATCH_STAGE" \
+            --checker "$UNIT_CHECKER"
+
+      - name: Cache ccache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build-repo/agnos/.ccache
+          key: ccache-fajita-${{ hashFiles('build-repo/repos.lock', 'build-repo/patches/**') }}
+          restore-keys: |
+            ccache-fajita-
+
+      - name: Extract toolchain
+        run: |
+          git lfs install --skip-repo
+          cd build-repo/agnos && ./tools/extract_tools.sh
+
+      - name: Build kernel + boot.img
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/build-repo/agnos/.ccache
+          CCACHE_MAXSIZE: 6G
+        run: |
+          set -o pipefail
+          cd build-repo/agnos
+          export DEFCONFIG=agnos_fajita_defconfig
+          ./build_kernel.sh 2>&1 | tee build_kernel.log
+          ls -l output/boot.img
+
+      - name: Verify boot.img
+        run: |
+          set -euo pipefail
+          cd build-repo/agnos
+          ls -l output/
+          strings -n 8 output/boot.img | grep -m3 -E "comma fajita|comma_tizi" \
+            || { echo "::error::DTB model string missing from boot.img"; exit 1; }
+          strings -n 8 output/boot.img | grep -m1 "isolcpus=1-7" \
+            || { echo "::error::cmdline not embedded"; exit 1; }
+
+      - name: Build system image (rootfs)
+        if: ${{ inputs.build_system }}
+        env:
+          GIT_HASH: ${{ github.sha }}
+        run: |
+          set -o pipefail
+          cd build-repo/agnos
+          ./build_system.sh 2>&1 | tee build_system.log
+          ls -l output/system.img
+          debugfs -R "stat /etc/systemd/system/comma.service" output/system.img 2>&1 | head -3
+          debugfs -R "stat /VERSION" output/system.img 2>&1 | head -3
+
+      - name: Collect artifacts + sha256
+        id: hashes
+        run: |
+          set -euo pipefail
+          ART="$GITHUB_WORKSPACE/artifacts"
+          mkdir -p "$ART"
+          cd build-repo/agnos
+          cp output/boot.img "$ART/boot.img"
+          # 内核镜像：Observed 名称 Image.gz-dtb（agnos-v2/kernel-out-v3/ 与 fajita-kernel-9.zip）
+          KIMG=$(find . -maxdepth 6 \( -name 'Image.gz-dtb' -o -name 'Image-dtb' -o -name 'Image' \) | head -1)
+          test -n "$KIMG" || { echo "::error::no kernel image found (Image.gz-dtb/Image-dtb/Image)"; exit 1; }
+          echo "kernel image: $KIMG"
+          cp "$KIMG" "$ART/Image.gz-dtb"
+          cp output/kernel.config "$ART/kernel.config" 2>/dev/null || \
+            cp .config "$ART/kernel.config" 2>/dev/null || true
+          find . -maxdepth 6 -name 'comma_fajita.dtb' -exec cp {} "$ART/comma_fajita.dtb" \;
+          if [ -f output/system.img ]; then cp output/system.img "$ART/system.img"; fi
+          [ -d output/linux-headers ] && cp -r output/linux-headers "$ART/linux-headers" || true
+          (cd agnos-kernel-sdm845 && git rev-parse HEAD) > "$ART/KERNEL_COMMIT"
+          git rev-parse HEAD > "$ART/AGNOS_BUILDER_COMMIT"
+          echo "$VBUS_VARIANT" > "$ART/VBUS_VARIANT"
+          uname -a > "$ART/RUNNER"
+          # 只对文件做 sha256（linux-headers 是目录，sha256sum 对目录会报错）
+          cd "$ART" && find . -type f ! -name 'SHA256SUMS.txt' -print0 \
+            | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          cd "$ART" && sha256sum -c SHA256SUMS.txt > /dev/null
+          echo "manifest entries: $(wc -l < "$ART/SHA256SUMS.txt")" 
+          echo "boot_sha256=$(sha256sum boot.img | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "kernel_sha256=$(sha256sum Image.gz-dtb | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          if [ -f system.img ]; then
+            echo "system_sha256=$(sha256sum system.img | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          else
+            echo "system_sha256=absent(build_system=false)" >> "$GITHUB_OUTPUT"
+          fi
+          echo "artifact=fajita-base-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          cat SHA256SUMS.txt
+
+      - name: Upload foundation images
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fajita-base-${{ github.run_number }}
+          path: |
+            artifacts/boot.img
+            artifacts/Image.gz-dtb
+            artifacts/kernel.config
+            artifacts/comma_fajita.dtb
+            artifacts/system.img
+            artifacts/linux-headers
+            artifacts/SHA256SUMS.txt
+            artifacts/KERNEL_COMMIT
+            artifacts/AGNOS_BUILDER_COMMIT
+            artifacts/VBUS_VARIANT
+            artifacts/RUNNER
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fajita-base-logs-${{ github.run_number }}
+          path: |
+            build-repo/agnos/*.log
+            build-repo/agnos/output/**
+          if-no-files-found: ignore
+          retention-days: 7

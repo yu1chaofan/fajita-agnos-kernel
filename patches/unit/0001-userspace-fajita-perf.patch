@@ -1,0 +1,990 @@
+--- /dev/null
++++ b/userspace/root/usr/comma/perf_mode.sh
+@@ -0,0 +1,552 @@
++#!/bin/sh
++# perf_mode.sh -- fajita (OnePlus 6T / SDM845) CPU+GPU+thermal mode controller
++#
++# PHASE22 / D2 (U2+U3).  Pure POSIX sh: verified with `sh -n` (dash) on the
++# host and intended for /system/bin/sh (mksh) on the device as well.
++#
++#   perf_mode.sh status                 show current state, read-only
++#   perf_mode.sh default                restore every value recorded in mode-backup
++#   perf_mode.sh perf                   performance: big cores + GPU pinned, trips relaxed
++#   perf_mode.sh psu                    perf + charge-derate removed, over-temp guard armed
++#   perf_mode.sh --from-config          read mode from /persist/params/perf_mode
++#                                       then /etc/fajita/perf_mode (systemd entry point)
++#
++#   global flags (any position):
++#     --dry-run            print the writes, touch nothing (no mkdir, no write)
++#     --sysroot=DIR        rehearse against a fake sysfs tree (host self-test only)
++#     --state-dir=DIR      backup/state location (default /var/lib/fajita-perf)
++#     --watch              (psu only) stay resident and fall back to default on over-temp
++#     --interval=N         (--watch) guard sampling period, default 10 s
++#
++# ROLLBACK CONTRACT
++#   Every write first records the pre-change value in $STATE_DIR/mode-backup, one
++#   "path<TAB>value" line per path, APPEND-ONLY and RECORD-ONCE.  A path is never
++#   re-recorded, so `perf` -> `psu` -> `default` restores the *boot-time* value,
++#   not the intermediate one.  `default` replays that file in reverse order
++#   (min_freq before max_freq, governor before max_freq), which is the only order
++#   in which cpufreq/devfreq limit writes cannot hit EINVAL.
++#
++# Every sysfs path is existence-checked first: on a host (or on a device where a
++# driver did not bind) the script prints SKIP and keeps going.  It never exits
++# because a node is missing.
++
++PROG=perf_mode
++# PHASE28: Android 的 / 是只读 rootfs，/var 不存在 -> mkdir 直接失败。
++# 这里按顺序挑第一个能创建的位置；AGNOS 上 /var/lib 可用，Android 上落到
++# /data/local/tmp，二者都不会因为只读而整体退出。
++if [ -n "${FAJITA_PERF_STATE_DIR:-}" ]; then
++  STATE_DIR=$FAJITA_PERF_STATE_DIR
++else
++  STATE_DIR=
++  for _cand in /var/lib/fajita-perf /persist/fajita-perf /data/local/tmp/fajita-perf; do
++    if mkdir -p "$_cand" 2>/dev/null && [ -w "$_cand" ]; then
++      STATE_DIR=$_cand
++      break
++    fi
++  done
++  [ -z "$STATE_DIR" ] && STATE_DIR=/var/lib/fajita-perf   # 保留原行为，让报错可读
++  unset _cand
++fi
++SYSROOT=${FAJITA_PERF_SYSROOT:-}
++
++BACKUP=
++STATEF=
++DRY=0
++WATCH=0
++GUARD_INTERVAL=${GUARD_INTERVAL:-10}
++FAILS=0
++WARNS=0
++SKIPS=0
++
++# ---- tunables (override from env or edit here) ---------------------------
++TRIP_RAISE_MC=${TRIP_RAISE_MC:-5000}      # +5.0 C on every matched trip point
++TRIP_CAP_MC=${TRIP_CAP_MC:-110000}        # never push a trip above 110.0 C
++TRIP_ZONES=${TRIP_ZONES:-"cpu*-usr gpu0-usr quiet-therm-adc"}
++BAT_ABORT_DC=${BAT_ABORT_DC:-450}         # 45.0 C  -> psu refuses / reverts to default
++BAT_WARN_DC=${BAT_WARN_DC:-420}           # 42.0 C  -> warn only
++PSU_INPUT_CURRENT_UA=${PSU_INPUT_CURRENT_UA:-3000000}
++# candidate sysfs knobs, tried in order; the first one that accepts the write wins
++PSU_CURRENT_KNOBS=${PSU_CURRENT_KNOBS:-"/sys/class/power_supply/battery/input_current_max /sys/class/power_supply/battery/input_current_limit /sys/class/power_supply/usb/current_max"}
++PSU_LEVEL_KNOBS=${PSU_LEVEL_KNOBS:-"/sys/class/power_supply/battery/charge_control_limit /sys/class/power_supply/battery/system_temp_level"}
++# WARNING: charging_enabled=0 is the only true "run from VBUS, battery idle" switch
++# on this vendor kernel, but it can also stop VBUS negotiation on some variants.
++# Off by default; verify on the bench (PHASE22 report §8 A9) before enabling.
++PSU_STOP_CHARGE=${PSU_STOP_CHARGE:-0}
++CONFIG_FILES=${CONFIG_FILES:-"/persist/params/perf_mode /etc/fajita/perf_mode"}
++
++# ------------------------------------------------------------------ helpers
++say() { printf '%s\n' "$*"; }
++log() { printf '[%s] %s\n' "$PROG" "$*" >&2; }
++
++# p PATH  -> PATH prefixed by --sysroot (empty sysroot = real /)
++p() { printf '%s%s' "$SYSROOT" "$1"; }
++
++# rel DIR -> path relative to the /sys root (so wr() can re-add SYSROOT exactly once)
++rel() { printf '%s' "${1#"$SYSROOT"}"; }
++
++mkdir_state() {
++  if [ "$DRY" = 1 ] || [ "$CMD" = status ]; then
++    BACKUP="$STATE_DIR/mode-backup"
++    STATEF="$STATE_DIR/mode"
++    return 0
++  fi
++  mkdir -p "$STATE_DIR" 2>/dev/null || { log "cannot create $STATE_DIR"; return 1; }
++  BACKUP="$STATE_DIR/mode-backup"
++  STATEF="$STATE_DIR/mode"
++  return 0
++}
++
++bak_have() {
++  [ -f "$BACKUP" ] || return 1
++  awk -F'\t' -v q="$1" '$1==q{found=1} END{exit !found}' "$BACKUP"
++}
++
++bak_add() {
++  bak_have "$1" && return 0
++  printf '%s\t%s\n' "$1" "$2" >> "$BACKUP"
++}
++
++# bak_value PATH -> the recorded pre-change value (empty when not recorded)
++bak_value() {
++  [ -f "$BACKUP" ] || return 0
++  awk -F'\t' -v q="$1" '$1==q{print $2; exit}' "$BACKUP"
++}
++
++# rd PATH (relative to /sys) -> first line, empty when absent
++rd() {
++  [ -r "$(p "$1")" ] || return 0
++  head -n1 "$(p "$1")" 2>/dev/null
++}
++
++# wr PATH VALUE LABEL [critical]
++wr() {
++  _path=$1; _val=$2; _lbl=$3; _crit=${4:-0}
++  _rp=$(p "$_path")
++  if [ ! -e "$_rp" ]; then
++    say "SKIP  $_lbl: $_path (absent)"
++    SKIPS=$((SKIPS+1)); return 0
++  fi
++  _orig=$(head -n1 "$_rp" 2>/dev/null)
++  if [ "$_orig" = "$_val" ]; then
++    say "KEEP  $_lbl: $_path = $_val (already)"
++    return 0
++  fi
++  if [ "$DRY" = 1 ]; then
++    say "DRY   $_lbl: $_path <- $_val (was $_orig)"
++    return 0
++  fi
++  if ! { printf '%s\n' "$_val" > "$_rp"; } 2>/dev/null; then
++    say "FAIL  $_lbl: $_path <- $_val (write rejected; driver may pin this node)"
++    if [ "$_crit" = 1 ]; then FAILS=$((FAILS+1)); else WARNS=$((WARNS+1)); fi
++    return 1
++  fi
++  # record the original only after the kernel accepted the write, otherwise a
++  # read-only node would end up in the ledger and `default` would report a
++  # spurious restore failure for a value that never changed
++  bak_add "$_path" "$_orig"
++  _now=$(head -n1 "$_rp" 2>/dev/null)
++  if [ "$_now" != "$_val" ]; then
++    say "WARN  $_lbl: $_path readback=$_now want=$_val (driver overrode)"
++    if [ "$_crit" = 1 ]; then FAILS=$((FAILS+1)); else WARNS=$((WARNS+1)); fi
++    return 1
++  fi
++  say "OK    $_lbl: $_path <- $_val (was $_orig)"
++  return 0
++}
++
++# try_first "PATHLIST" VALUE LABEL: write the first knob that accepts it.
++# Missing node -> SKIP; present but read-only (vendor kernels expose
++# charge_control_limit read-only) -> FAIL(non-critical) and move on.
++try_first() {
++  _list=$1; _val=$2; _lbl=$3
++  _ok=0
++  for _k in $_list; do
++    if [ ! -e "$(p "$_k")" ]; then
++      say "SKIP  $_lbl: $_k (absent)"
++      SKIPS=$((SKIPS+1))
++      continue
++    fi
++    if wr "$_k" "$_val" "$_lbl" 0; then
++      _ok=1
++      break
++    fi
++    say "      $_lbl: $_k rejected, trying next candidate"
++  done
++  [ "$_ok" = 1 ] || say "NOTE  $_lbl: no writable knob among '$_list'"
++  return 0
++}
++
++# CPUFREQ_DIRS: one line per policy dir (per-cpu dirs only when no policy dir)
++cpu_dirs() {
++  _base=$(p /sys/devices/system/cpu/cpufreq)
++  _n=0
++  for _d in "$_base"/policy*; do
++    [ -d "$_d" ] || continue
++    _n=1
++    say "$_d"
++  done
++  [ "$_n" = 1 ] && return 0
++  _base=$(p /sys/devices/system/cpu)
++  for _d in "$_base"/cpu[0-9]*/cpufreq; do
++    [ -d "$_d" ] || continue
++    say "$_d"
++  done
++}
++
++# 0 = this policy contains a cpu >= 4 (fajita big cluster), 1 = small
++is_big() {
++  _big=0
++  if [ -r "$1/affected_cpus" ]; then
++    for _c in $(cat "$1/affected_cpus" 2>/dev/null); do
++      [ "$_c" -ge 4 ] 2>/dev/null && _big=1
++    done
++  else
++    case "$1" in */cpu[4-9]/cpufreq) _big=1 ;; esac
++  fi
++  [ "$_big" = 1 ] && return 0
++  return 1
++}
++
++zone_match() {
++  for _pat in $TRIP_ZONES; do
++    case "$1" in $_pat) return 0 ;; esac
++  done
++  return 1
++}
++
++# --------------------------------------------------------------- apply perf
++apply_perf() {
++  say "== perf: CPU big cores (cpu4-7) =="
++  _seen=0
++  for _d in $(cpu_dirs); do
++    _r=$(rel "$_d")
++    if ! is_big "$_d"; then
++      say "KEEP  small-core policy: $(basename "$_d") (governor left as is)"
++      continue
++    fi
++    _seen=1
++    _cmax=$(head -n1 "$_d/cpuinfo_max_freq" 2>/dev/null)
++    if [ -z "$_cmax" ]; then
++      say "SKIP  maxfreq: $_r/cpuinfo_max_freq (absent) -- governor only"
++      SKIPS=$((SKIPS+1))
++    else
++      # ceiling first: scaling_max_freq < scaling_min_freq would be EINVAL
++      wr "$_r/scaling_max_freq" "$_cmax" "cpu max freq ($(basename "$_d"))" 1
++    fi
++    wr "$_r/scaling_governor" performance "cpu governor ($(basename "$_d"))" 1
++  done
++  if [ "$_seen" = 0 ]; then
++    say "SKIP  big-core cpufreq policy (no cpu>=4 dir found)"
++    SKIPS=$((SKIPS+1))
++  fi
++
++  say "== perf: GPU pinned to the highest available step =="
++  _gd=/sys/class/kgsl/kgsl-3d0/devfreq
++  _gmax=
++  for _cand in "$_gd/available_frequencies" /class/kgsl/kgsl-3d0/gpu_available_frequencies; do
++    [ -r "$(p "$_cand")" ] || continue
++    _gmax=$(tr -s ' ' '\n' < "$(p "$_cand")" | grep -E '^[0-9]+$' | sort -n | tail -n1)
++    [ -n "$_gmax" ] && break
++  done
++  if [ -z "$_gmax" ]; then
++    _gmax=$(rd "$_gd/max_freq")
++    [ -n "$_gmax" ] && say "WARN  gpu: available_frequencies absent, reusing current max_freq=$_gmax"
++  fi
++  if [ -n "$_gmax" ]; then
++    wr "$_gd/max_freq" "$_gmax" "gpu devfreq max_freq" 1
++    wr "$_gd/min_freq" "$_gmax" "gpu devfreq min_freq (floor)" 1
++  else
++    say "SKIP  gpu devfreq freq table (no available_frequencies / max_freq)"
++    SKIPS=$((SKIPS+1))
++  fi
++  # PHASE28 实测：写 kgsl governor=performance 后**无法再切回**（后续写任何
++  # 合法值都 rc=1，回读仍是 performance，只有重启能恢复）。而 min/max 钉到
++  # 最高档本身就已让 cur_freq 满载（PHASE27/PHASE28 两次独立验证 median 33.45
++  # / 33.47 ms 一致），所以这一行**主动不写**，避免制造不可逆副作用。
++  say "SKIP  gpu devfreq governor (intentionally not set: kgsl governor write is irreversible once switched to performance)"
++
++  say "== perf: thermal trips +${TRIP_RAISE_MC}mC, cap ${TRIP_CAP_MC}mC, zones='$TRIP_ZONES' =="
++  _tz=$(p /sys/class/thermal)
++  for _z in "$_tz"/thermal_zone*; do
++    [ -d "$_z" ] || continue
++    _type=$(head -n1 "$_z/type" 2>/dev/null)
++    zone_match "$_type" || continue
++    _zr=$(rel "$_z")
++    _i=0
++    _hit=0
++    while :; do
++      _tp="$_z/trip_point_${_i}_temp"
++      [ -e "$_tp" ] || break
++      _hit=1
++      _cur=$(head -n1 "$_tp" 2>/dev/null)
++      case "$_cur" in
++        ''|*[!0-9]*) _i=$((_i+1)); continue ;;
++      esac
++      # relative adjustment is always computed from the RECORDED original so that
++      # perf/psu can be re-applied any number of times without walking the trip up
++      _base=$(bak_value "$_zr/trip_point_${_i}_temp")
++      [ -n "$_base" ] || _base=$_cur
++      _new=$((_base + TRIP_RAISE_MC))
++      [ "$_new" -gt "$TRIP_CAP_MC" ] && _new=$TRIP_CAP_MC
++      if [ "$_new" -le "$_base" ]; then
++        say "KEEP  trip: $_type[$_i] = $_base (already at/over cap ${TRIP_CAP_MC})"
++      else
++        wr "$_zr/trip_point_${_i}_temp" "$_new" "trip $_type[$_i] (base $_base)" 0
++      fi
++      _i=$((_i+1))
++    done
++    if [ "$_hit" = 0 ]; then
++      say "SKIP  trip: $_type (no trip_point_*_temp)"
++      SKIPS=$((SKIPS+1))
++    fi
++  done
++}
++
++# ------------------------------------------------------------ apply default
++apply_default() {
++  say "== default: replaying mode-backup in reverse =="
++  if [ ! -f "$BACKUP" ]; then
++    say "SKIP  mode-backup ($STATE_DIR/mode-backup absent): nothing recorded,"
++    say "      therefore nothing has been changed since boot either."
++    SKIPS=$((SKIPS+1)); return 0
++  fi
++  _n=$(wc -l < "$BACKUP" 2>/dev/null | tr -d ' ')
++  say "      $_n recorded path(s)"
++  [ "$_n" = 0 ] && return 0
++  _list="$STATE_DIR/.restore.$$"
++  if [ "$DRY" = 1 ]; then
++    awk -F'\t' '{a[NR]=$0} END{for(i=NR;i>0;i--) print a[i]}' "$BACKUP" |
++    while IFS='	' read -r _p _v; do
++      [ -n "$_p" ] && say "DRY   restore: $_p <- $_v"
++    done
++    return 0
++  fi
++  awk -F'\t' '{a[NR]=$0} END{for(i=NR;i>0;i--) print a[i]}' "$BACKUP" > "$_list"
++  while IFS='	' read -r _p _v; do
++    [ -n "$_p" ] || continue
++    if [ ! -e "$(p "$_p")" ]; then
++      say "SKIP  restore: $_p (node gone)"
++      continue
++    fi
++    if { printf '%s\n' "$_v" > "$(p "$_p")"; } 2>/dev/null; then
++      _now=$(head -n1 "$(p "$_p")" 2>/dev/null)
++      if [ "$_now" = "$_v" ]; then
++        say "OK    restore: $_p <- $_v"
++      else
++        say "WARN  restore: $_p readback=$_now want=$_v"
++        WARNS=$((WARNS+1))
++      fi
++    else
++      say "FAIL  restore: $_p <- $_v"
++      FAILS=$((FAILS+1))
++    fi
++  done < "$_list"
++  rm -f "$_list" 2>/dev/null
++  return 0
++}
++
++# ---------------------------------------------------------------- psu guard
++bat_temp_dc() {
++  _b=$(p /sys/class/power_supply/battery)
++  [ -r "$_b/temp" ] || return 1
++  head -n1 "$_b/temp" 2>/dev/null
++}
++
++# 0 ok, 2 = over-temp (caller must stop), 1 = cannot evaluate
++psu_guard() {
++  _t=$(bat_temp_dc) || {
++    say "SKIP  battery/temp (absent): over-temp guard cannot run"
++    SKIPS=$((SKIPS+1)); return 1
++  }
++  case "$_t" in
++    ''|*[!0-9-]*) say "SKIP  battery/temp unparsable ('$_t')"; return 1 ;;
++  esac
++  if [ "$_t" -ge "$BAT_ABORT_DC" ]; then
++    say "GUARD battery temp ${_t} deciC >= abort ${BAT_ABORT_DC} -> REVERT to default"
++    log "over-temperature: battery ${_t} deciC >= ${BAT_ABORT_DC} deciC; psu -> default"
++    apply_default
++    if [ "$DRY" = 0 ]; then printf 'default\n' > "$STATEF"; fi
++    return 2
++  fi
++  if [ "$_t" -ge "$BAT_WARN_DC" ]; then
++    say "WARN  battery temp ${_t} deciC >= warn ${BAT_WARN_DC}; psu kept"
++    WARNS=$((WARNS+1))
++  fi
++  return 0
++}
++
++apply_psu() {
++  apply_perf
++  say "== psu: raise the input current limit, keep an over-temp trip =="
++  _b=/sys/class/power_supply/battery
++  _t=$(bat_temp_dc) || _t=
++  say "      battery temp=${_t:-<absent>} deciC status=$(rd "$_b/status") volt=$(rd "$_b/voltage_now")"
++  say "      derate level now: charge_control_limit=$(rd "$_b/charge_control_limit")/$(rd "$_b/charge_control_limit_max")"
++  # pmi8998 qcom,thermal-mitigation = <3000000 1500000 1000000 500000> uA is driven
++  # through the "system temp level" index; on this vendor kernel the sysfs node
++  # that carries it (charge_control_limit) is registered READ-ONLY, so the level
++  # path normally cannot be forced from userspace -- try anyway, report honestly.
++  try_first "$PSU_LEVEL_KNOBS" 0 "charge derate level (0 = no derate)"
++  try_first "$PSU_CURRENT_KNOBS" "$PSU_INPUT_CURRENT_UA" "input current limit"
++  if [ "$PSU_STOP_CHARGE" = 1 ]; then
++    say "      PSU_STOP_CHARGE=1 -> attempting charging_enabled=0 (VBUS-only)"
++    wr "$_b/charging_enabled" 0 "battery charging_enabled (stop charge)" 0
++  else
++    say "      PSU_STOP_CHARGE=0 -> charging left enabled (charging_enabled not touched)"
++  fi
++  psu_guard
++  _grc=$?
++  [ "$_grc" = 2 ] && return 2
++  if [ "$WATCH" = 1 ] && [ "$DRY" = 0 ]; then
++    say "GUARD armed: every ${GUARD_INTERVAL}s, revert at ${BAT_ABORT_DC} deciC"
++    while :; do
++      sleep "$GUARD_INTERVAL"
++      psu_guard || return 0
++      printf '%s,%s,%s\n' "$(date +%s)" "$(bat_temp_dc)" "$(rd "$_b/current_now")" \
++        >> "$STATE_DIR/guard.log" 2>/dev/null
++    done
++  fi
++  return 0
++}
++
++# -------------------------------------------------------------------- status
++do_status() {
++  _mode=unknown
++  [ -r "$STATEF" ] && _mode=$(head -n1 "$STATEF" 2>/dev/null)
++  say "mode           : $_mode"
++  say "state dir      : $STATE_DIR (sysroot '${SYSROOT:-/}')"
++  if [ -f "$BACKUP" ]; then
++    say "backup entries : $(wc -l < "$BACKUP" | tr -d ' ')"
++  else
++    say "backup entries : 0 (mode-backup absent)"
++  fi
++  say "tunables       : trip+${TRIP_RAISE_MC}mC cap ${TRIP_CAP_MC}mC zones='${TRIP_ZONES}' bat_abort=${BAT_ABORT_DC} bat_warn=${BAT_WARN_DC}"
++  say "-- cpu --"
++  for _d in $(cpu_dirs); do
++    _r=$(rel "$_d")
++    say "  $(basename "$_d"): gov=$(rd "$_r/scaling_governor") max=$(rd "$_r/scaling_max_freq") hwmax=$(rd "$_r/cpuinfo_max_freq") min=$(rd "$_r/scaling_min_freq")"
++  done
++  say "-- gpu --"
++  _gd=/sys/class/kgsl/kgsl-3d0/devfreq
++  say "  gov=$(rd "$_gd/governor") min=$(rd "$_gd/min_freq") max=$(rd "$_gd/max_freq") cur=$(rd "$_gd/cur_freq")"
++  say "-- battery --"
++  _b=/sys/class/power_supply/battery
++  say "  status=$(rd "$_b/status") temp=$(rd "$_b/temp") cur=$(rd "$_b/current_now") volt=$(rd "$_b/voltage_now")"
++  say "  charge: enabled=$(rd "$_b/charging_enabled") icl=$(rd "$_b/input_current_max") ccl=$(rd "$_b/charge_control_limit")/$(rd "$_b/charge_control_limit_max")"
++  say "-- thermal zones (matched by TRIP_ZONES) --"
++  _tz=$(p /sys/class/thermal)
++  for _z in "$_tz"/thermal_zone*; do
++    [ -d "$_z" ] || continue
++    _type=$(head -n1 "$_z/type" 2>/dev/null)
++    zone_match "$_type" || continue
++    say "  $_type: temp=$(head -n1 "$_z/temp" 2>/dev/null) policy=$(head -n1 "$_z/policy" 2>/dev/null) trip0=$(head -n1 "$_z/trip_point_0_temp" 2>/dev/null)"
++  done
++}
++
++# ----------------------------------------------------------- config dispatch
++# prints ONLY the mode on stdout; comments go to stderr
++read_mode_file() {
++  for _f in $CONFIG_FILES; do
++    [ -r "$_f" ] || continue
++    _m=$(head -n1 "$_f" 2>/dev/null | tr -d ' \t\r')
++    case "$_m" in
++      default|perf|psu) log "config: $_f => $_m"; printf '%s' "$_m"; return 0 ;;
++      '') continue ;;
++      *) log "ignoring invalid mode '$_m' in $_f" ;;
++    esac
++  done
++  log "config: no valid mode file among '$CONFIG_FILES', using default"
++  printf 'default'
++}
++
++usage() {
++  # print the "subcommands" block of the header comment, immune to line drift
++  awk '/^#   perf_mode.sh status/{p=1} /^# ROLLBACK CONTRACT/{p=0} p' "$0" |
++    sed 's/^# \{0,1\}//'
++  exit 64
++}
++
++# ------------------------------------------------------------------- driver
++CMD=
++FROM_CONFIG=0
++for a in "$@"; do
++  case "$a" in
++    --dry-run) DRY=1 ;;
++    --watch) WATCH=1 ;;
++    --from-config) FROM_CONFIG=1 ;;
++    --config-file=*) CONFIG_FILES=${a#--config-file=} ;;
++    --sysroot=*) SYSROOT=${a#--sysroot=} ;;
++    --state-dir=*) STATE_DIR=${a#--state-dir=} ;;
++    --interval=*) GUARD_INTERVAL=${a#--interval=} ;;
++    --sysroot|--state-dir|--interval|--config-file)
++      log "$a needs a value (use --opt=value)"; exit 64 ;;
++    -h|--help) usage ;;
++    -*) log "unknown flag $a"; usage ;;
++    *) if [ -z "$CMD" ]; then CMD=$a; else log "unexpected arg $a"; usage; fi ;;
++  esac
++done
++
++case "$SYSROOT" in */) SYSROOT=${SYSROOT%/} ;; esac
++
++# --from-config is the systemd entry point: with no explicit subcommand, the
++# mode comes from the config file.  Bare `perf_mode.sh` (no arg, no flag) is a
++# usage error on purpose -- a typo must not silently apply a mode.
++if [ -z "$CMD" ]; then
++  if [ "$FROM_CONFIG" = 1 ]; then
++    CMD=$(read_mode_file)
++    case "$CMD" in
++      default|perf|psu) ;;
++      *) log "config yielded '$CMD', falling back to default"; CMD=default ;;
++    esac
++  else
++    usage
++  fi
++fi
++
++mkdir_state || exit 1
++say "$PROG: cmd=$CMD dry=$DRY sysroot='${SYSROOT:-/}' state=$STATE_DIR"
++
++case "$CMD" in
++  status)
++      do_status
++      exit 0
++      ;;
++  default)
++      apply_default
++      if [ "$DRY" = 0 ]; then printf 'default\n' > "$STATEF"; fi
++      ;;
++  perf)
++      apply_perf
++      if [ "$FAILS" -gt 0 ]; then
++        log "$FAILS critical write(s) failed -> rolling back to default"
++        apply_default
++        if [ "$DRY" = 0 ]; then printf 'default\n' > "$STATEF"; fi
++        say "RESULT $CMD ROLLED BACK fails=$FAILS warns=$WARNS skips=$SKIPS"
++        exit 1
++      fi
++      if [ "$DRY" = 0 ]; then printf 'perf\n' > "$STATEF"; fi
++      ;;
++  psu)
++      apply_psu
++      _rc=$?
++      if [ "$_rc" = 2 ]; then
++        say "RESULT psu REVERTED TO DEFAULT (over-temp guard) fails=$FAILS warns=$WARNS skips=$SKIPS"
++        exit 2
++      fi
++      if [ "$FAILS" -gt 0 ]; then
++        log "$FAILS critical write(s) failed -> rolling back to default"
++        apply_default
++        if [ "$DRY" = 0 ]; then printf 'default\n' > "$STATEF"; fi
++        say "RESULT $CMD ROLLED BACK fails=$FAILS warns=$WARNS skips=$SKIPS"
++        exit 1
++      fi
++      if [ "$DRY" = 0 ]; then printf 'psu\n' > "$STATEF"; fi
++      ;;
++  *)
++      usage
++      ;;
++esac
++
++say "RESULT mode=$CMD fails=$FAILS warns=$WARNS skips=$SKIPS"
++[ "$FAILS" -gt 0 ] && exit 1
++exit 0
+--- /dev/null
++++ b/userspace/root/usr/comma/thermal_log.sh
+@@ -0,0 +1,281 @@
++#!/bin/sh
++# thermal_log.sh -- fajita (OnePlus 6T / SDM845) thermal + power sampler
++#
++# PHASE22 / D3.  Emits ONE CSV row per sample; the header is built once at
++# start-up from the nodes that actually exist, so a missing driver produces an
++# empty field (and a SKIP line on stderr) instead of a broken row.
++#
++#   thermal_log.sh [--interval N] [--count N] [--out FILE] [--tag NAME]
++#                  [--sysroot=DIR] [--dry-run]
++#
++#   --interval N   seconds between samples (default 10)
++#   --count N      stop after N samples (default 0 = until killed)
++#   --out FILE     append to FILE (default /var/log/fajita-thermal.csv);
++#                  the header is written only when FILE is new/empty
++#   --tag NAME     value put in the "tag" column (e.g. pre_cooling / post_cooling)
++#   --sysroot=DIR  read a fake tree (host self-test); all paths are DIR-prefixed
++#   --dry-run      print rows to stdout, write no file
++#
++# What is sampled (per PHASE21 §3 U2/U3 + PHASE18 sampling caliber):
++#   thermal_zone*/{type,temp,policy,trip_point_*_temp}
++#   cpu*/cpufreq/scaling_cur_freq (per core, kHz)
++#   kgsl-3d0/devfreq/{cur_freq,min_freq,max_freq,governor}
++#   power_supply/*/{status,temp,current_now,voltage_now}
++#   /proc/meminfo MemAvailable+MemFree, /proc/loadavg load1, /proc/uptime
++#   throttling: zone governor ("policy") or CPU governor changed vs the
++#   start-up baseline, CPU scaling_max_freq below cpuinfo_max_freq, a zone at or
++#   above its trip, or any cooling_device with cur_state != 0.
++#
++# Units are the kernel's own: mC for temperatures, kHz for CPU, Hz for kgsl
++# (cur_freq/min_freq/max_freq), deci-C for power_supply temp, uA/uV for current.
++
++PROG=thermal_log
++SYSROOT=${FAJITA_PERF_SYSROOT:-}
++INTERVAL=10
++COUNT=0
++OUT=/var/log/fajita-thermal.csv
++TAG=${FAJITA_LOG_TAG:-run}
++DRY=0
++
++say() { printf '%s\n' "$*"; }
++log() { printf '[%s] %s\n' "$PROG" "$*" >&2; }
++p() { printf '%s%s' "$SYSROOT" "$1"; }
++
++for a in "$@"; do
++  case "$a" in
++    --interval=*) INTERVAL=${a#--interval=} ;;
++    --count=*)    COUNT=${a#--count=} ;;
++    --out=*)      OUT=${a#--out=} ;;
++    --tag=*)      TAG=${a#--tag=} ;;
++    --sysroot=*)  SYSROOT=${a#--sysroot=} ;;
++    --dry-run)    DRY=1 ;;
++    -h|--help)    sed -n '5,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
++    *) log "unknown arg $a"; exit 64 ;;
++  esac
++done
++case "$SYSROOT" in */) SYSROOT=${SYSROOT%/} ;; esac
++
++WORK=${TMPDIR:-/tmp}/thermal_log.$$
++mkdir -p "$WORK" 2>/dev/null || { log "cannot create $WORK"; exit 1; }
++trap 'rm -rf "$WORK"' EXIT INT TERM
++
++sanitize() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/_/g'; }
++
++# ------------------------------------------------------------------ spec build
++# spec line: NAME<TAB>KIND<TAB>ARG1<TAB>ARG2
++SPEC="$WORK/spec"
++: > "$SPEC"
++add() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$SPEC"; }
++
++add tag const "$TAG" -
++add ts const - -
++add uptime proc /proc/uptime 1st
++add memavail_kb meminfo MemAvailable -
++add memfree_kb meminfo MemFree -
++add load1 loadavg - -
++
++# thermal zones
++_ni=0
++for _z in "$(p /sys/class/thermal)"/thermal_zone*; do
++  [ -d "$_z" ] || continue
++  _t=$(head -n1 "$_z/type" 2>/dev/null)
++  [ -n "$_t" ] || continue
++  _s=$(sanitize "$_t")
++  _zr=${_z#"$SYSROOT"}
++  add "t_${_ni}_${_s}_mC" file "$_zr/temp" -
++  add "t_${_ni}_${_s}_policy" file "$_zr/policy" -
++  add "t_${_ni}_${_s}_trip0_mC" file "$_zr/trip_point_0_temp" -
++  _ni=$((_ni+1))
++done
++[ "$_ni" = 0 ] && log "SKIP thermal zones: $(p /sys/class/thermal) has no thermal_zone*"
++
++# per-core cpu frequency
++_nc=0
++for _c in "$(p /sys/devices/system/cpu)"/cpu[0-9]*; do
++  [ -d "$_c" ] || continue
++  _n=${_c##*/cpu}
++  case "$_n" in ''|*[!0-9]*) continue ;; esac
++  _f="$_c/cpufreq/scaling_cur_freq"
++  if [ -r "$_f" ]; then
++    add "cpu${_n}_khz" file "${_f#"$SYSROOT"}" -
++    _nc=$((_nc+1))
++  fi
++done
++if [ "$_nc" = 0 ]; then
++  # fallback: policy dirs (label them by their affected_cpus list)
++  for _d in "$(p /sys/devices/system/cpu/cpufreq)"/policy*; do
++    [ -d "$_d" ] || continue
++    _name=$(basename "$_d" | sed 's/^policy/p/')
++    _f="$_d/scaling_cur_freq"
++    [ -r "$_f" ] && add "${_name}_khz" file "${_f#"$SYSROOT"}" -
++  done
++  log "SKIP per-core cpu freq: no cpu*/cpufreq/scaling_cur_freq (policy-level columns used)"
++fi
++
++# gpu
++_gd=$(p /sys/class/kgsl/kgsl-3d0/devfreq)
++if [ -d "$_gd" ]; then
++  for _f in cur_freq min_freq max_freq governor; do
++    [ -r "$_gd/$_f" ] && add "gpu_${_f}" file "/sys/class/kgsl/kgsl-3d0/devfreq/$_f" -
++  done
++else
++  log "SKIP gpu: $(p /sys/class/kgsl/kgsl-3d0/devfreq) absent"
++fi
++
++# power_supply
++_np=0
++for _ps in "$(p /sys/class/power_supply)"/*; do
++  [ -d "$_ps" ] || continue
++  _name=$(basename "$_ps" | sed 's/[^A-Za-z0-9]/_/g')
++  for _f in status temp current_now voltage_now; do
++    [ -r "$_ps/$_f" ] || continue
++    add "ps_${_name}_${_f}" file "/sys/class/power_supply/$(basename "$_ps")/$_f" -
++    _np=$((_np+1))
++  done
++done
++[ "$_np" = 0 ] && log "SKIP power_supply: no status/temp/current_now/voltage_now under $(p /sys/class/power_supply)"
++
++# cooling devices (the mechanism behind "throttled")
++_ncd=0
++for _cd in "$(p /sys/class/thermal)"/cooling_device*; do
++  [ -d "$_cd" ] || continue
++  _n=${_cd##*/cooling_device}
++  add "cool${_n}_state" file "/sys/class/thermal/cooling_device${_n}/cur_state" -
++  _ncd=$((_ncd+1))
++done
++[ "$_ncd" = 0 ] && log "SKIP cooling_device: no /sys/class/thermal/cooling_device*"
++
++add throttled computed - -
++add throttle_reason computed - -
++
++# ------------------------------------------------------------------- baseline
++BASE="$WORK/base"
++: > "$BASE"
++# zone policy + trip0 baseline, cpu governor + hwmax baseline
++for _z in "$(p /sys/class/thermal)"/thermal_zone*; do
++  [ -d "$_z" ] || continue
++  _t=$(head -n1 "$_z/type" 2>/dev/null)
++  [ -n "$_t" ] || continue
++  printf 'zone\t%s\t%s\t%s\n' "$_t" "$(head -n1 "$_z/policy" 2>/dev/null)" \
++    "$(head -n1 "$_z/trip_point_0_temp" 2>/dev/null)" >> "$BASE"
++done
++for _d in "$(p /sys/devices/system/cpu/cpufreq)"/policy*; do
++  [ -d "$_d" ] || continue
++  printf 'cpu\t%s\t%s\t%s\n' "$(basename "$_d")" \
++    "$(head -n1 "$_d/scaling_governor" 2>/dev/null)" \
++    "$(head -n1 "$_d/cpuinfo_max_freq" 2>/dev/null)" >> "$BASE"
++done
++
++# ------------------------------------------------------------------- reading
++read_one() { # read_one KIND ARG1 ARG2
++  case "$1" in
++    const)   printf '%s' "$2" ;;
++    file)    head -n1 "$(p "$2")" 2>/dev/null ;;
++    meminfo) awk -v k="$2:" '$1==k{print $2}' "$(p /proc/meminfo)" 2>/dev/null ;;
++    loadavg) awk '{print $1}' "$(p /proc/loadavg)" 2>/dev/null ;;
++    proc)    awk -v w="$3" '{print $1}' "$(p "$2")" 2>/dev/null ;;
++    computed) printf '' ;;
++    *)       printf '' ;;
++  esac
++}
++
++header() {
++  awk -F'\t' '{printf "%s%s", (NR>1?",":""), $1}' "$SPEC"
++  printf '\n'
++}
++
++# throttle evaluation -> "0|reason" or "1|reason;reason"
++eval_throttle() {
++  _r=
++  # 1) zone policy changed vs baseline
++  while IFS='	' read -r _k _ty _pol _tr; do
++    [ "$_k" = zone ] || continue
++    for _z in "$(p /sys/class/thermal)"/thermal_zone*; do
++      _t=$(head -n1 "$_z/type" 2>/dev/null)
++      [ "$_t" = "$_ty" ] || continue
++      _now=$(head -n1 "$_z/policy" 2>/dev/null)
++      [ "$_now" != "$_pol" ] && _r="$_r zone_policy:${_ty}(${_pol}->${_now});"
++      break
++    done
++  done < "$BASE"
++  # 2) cpu governor changed or max freq capped below hwmax
++  for _d in "$(p /sys/devices/system/cpu/cpufreq)"/policy*; do
++    [ -d "$_d" ] || continue
++    _base=$(awk -F'\t' -v q="$(basename "$_d")" '$1=="cpu" && $2==q{print $3"|"$4}' "$BASE")
++    _bgov=${_base%|*}
++    _bmax=${_base#*|}
++    _ngov=$(head -n1 "$_d/scaling_governor" 2>/dev/null)
++    _nmax=$(head -n1 "$_d/scaling_max_freq" 2>/dev/null)
++    [ -n "$_ngov" ] && [ "$_ngov" != "$_bgov" ] && _r="$_r cpu_gov:$(basename "$_d")(${_bgov}->${_ngov});"
++    case "$_nmax" in
++      ''|*[!0-9]*) : ;;
++      *)
++        if [ -n "$_bmax" ]; then
++          case "$_bmax" in
++            *[!0-9]*) : ;;
++            *) [ "$_nmax" -lt "$_bmax" ] && _r="$_r cpu_capped:$(basename "$_d")(${_nmax}<${_bmax});" ;;
++          esac
++        fi
++        ;;
++    esac
++  done
++  # 3) any zone at/above its trip0
++  for _z in "$(p /sys/class/thermal)"/thermal_zone*; do
++    [ -d "$_z" ] || continue
++    _t=$(head -n1 "$_z/type" 2>/dev/null)
++    _v=$(head -n1 "$_z/temp" 2>/dev/null)
++    _tr=$(head -n1 "$_z/trip_point_0_temp" 2>/dev/null)
++    case "$_v$_tr" in *[!0-9-]*) continue ;; esac
++    [ -n "$_v" ] && [ -n "$_tr" ] && [ "$_v" -ge "$_tr" ] && _r="$_r zone_trip:${_t}(${_v}>=${_tr});"
++  done
++  # 4) any cooling device engaged
++  for _cd in "$(p /sys/class/thermal)"/cooling_device*; do
++    [ -d "$_cd" ] || continue
++    _s=$(head -n1 "$_cd/cur_state" 2>/dev/null)
++    case "$_s" in ''|*[!0-9-]*) continue ;; esac
++    [ "$_s" != 0 ] && _r="$_r cooling:$(basename "$_cd")=${_s};"
++  done
++  if [ -n "$_r" ]; then printf '1|%s' "$_r"; else printf '0|'; fi
++}
++
++emit_row() {
++  _out=
++  _first=1
++  while IFS='	' read -r _n _k _a1 _a2; do
++    case "$_n" in
++      tag)      _v=$TAG ;;
++      ts)       _v=$(date +%s) ;;
++      throttled)
++        _tv=$(eval_throttle); _v=${_tv%%|*} ;;
++      throttle_reason)
++        _tv=$(eval_throttle); _v=${_tv#*|} ;;
++      *)        _v=$(read_one "$_k" "$_a1" "$_a2") ;;
++    esac
++    if [ "$_first" = 1 ]; then _out="$_v"; _first=0; else _out="$_out,$_v"; fi
++  done < "$SPEC"
++  printf '%s\n' "$_out"
++}
++
++# ---------------------------------------------------------------------- main
++if [ "$DRY" = 1 ]; then
++  header
++else
++  if [ ! -s "$OUT" ]; then
++    mkdir -p "$(dirname "$OUT")" 2>/dev/null
++    header > "$OUT" 2>/dev/null || { log "cannot write $OUT"; exit 1; }
++  fi
++fi
++
++_i=0
++while :; do
++  if [ "$DRY" = 1 ]; then
++    emit_row
++  else
++    emit_row >> "$OUT"
++  fi
++  _i=$((_i+1))
++  if [ "$COUNT" -gt 0 ] && [ "$_i" -ge "$COUNT" ]; then break; fi
++  sleep "$INTERVAL"
++done
++log "done: $_i sample(s) tag=$TAG sysroot='${SYSROOT:-/}'"
++exit 0
+--- /dev/null
++++ b/userspace/root/usr/lib/systemd/system/fajita-perf.service
+@@ -0,0 +1,43 @@
++[Unit]
++# PHASE23 / D2-D3 -- apply the configured fajita perf/thermal mode once at boot.
++#
++# fajita (OnePlus 6T / SDM845) ships no /FAJITA marker yet, so this unit is
++# dormant on every current image, tici/AGNOS included.  The PRIMARY apply point
++# is /usr/comma/comma.sh, right after its two `echo 1689600 > scaling_max_freq`
++# writes -- that is the only place that is strictly ordered against them.
++# This unit is the fallback for the case where comma.service is disabled/failed.
++Description=fajita perf/thermal mode apply (one-shot, fallback path)
++After=local-fs.target comma.service
++ConditionPathExists=/FAJITA
++ConditionPathExists=/usr/comma/perf_mode.sh
++ConditionPathIsDirectory=/sys/class/thermal
++
++[Service]
++Type=oneshot
++RemainAfterExit=yes
++# /persist is mounted read-only on AGNOS (etc/fstab: ro,discard,nosuid,nodev,noexec),
++# so the runtime override lives on userdata instead of /persist/params/perf_mode.
++Environment="CONFIG_FILES=/data/params/fajita-perf_mode /etc/fajita/perf_mode"
++# /var is a 128M tmpfs (etc/fstab), i.e. writable but volatile; the rollback
++# ledger is a boot-time baseline, so losing it on reboot is the correct behaviour.
++Environment=FAJITA_PERF_STATE_DIR=/var/lib/fajita-perf
++# Ordering guard for the fallback path only: comma.sh rewrites policy0/policy4
++# scaling_max_freq to 1689600 at ~t0, and starting before that would let its
++# tee undo our write.  perf_mode.sh is idempotent, so a late run is harmless.
++ExecStartPre=/bin/sleep 5
++# --from-config is the documented entry point.  It was broken in the first
++# phase22 drop (the flag loop swallowed every '-*' token and exited 64); the
++# fixed script -- sha256 4788a0c0…, shipped by this same patch -- parses it via
++# FROM_CONFIG=1.  Bare invocation is now a DELIBERATE usage error there, so this
++# unit must always pass the flag.
++ExecStart=/usr/comma/perf_mode.sh --from-config
++ExecReload=/usr/comma/perf_mode.sh --from-config
++ExecStop=/usr/comma/perf_mode.sh default
++TimeoutStartSec=90
++TimeoutStopSec=60
++StandardOutput=journal
++StandardError=journal
++SyslogIdentifier=fajita-perf
++
++[Install]
++WantedBy=multi-user.target
+--- /dev/null
++++ b/userspace/root/usr/lib/systemd/system/fajita-thermal-log.service
+@@ -0,0 +1,37 @@
++[Unit]
++# PHASE23 / D3 -- resident thermal/power sampler for fajita.
++#
++# Output directory choice, from the pinned AGNOS etc/fstab at
++# 3c3390f39f9985784b406d1dc37420c1a175915c:
++#   /dev/disk/by-partlabel/persist /persist auto ro,discard,nosuid,nodev,noexec
++#   /dev/disk/by-partlabel/userdata /data  auto discard,noatime,nodiratime,nosuid,nodev,nofail
++#   tmpfs /var tmpfs rw,...,size=128M      tmpfs /tmp tmpfs rw,...,size=150M
++# /persist is READ-ONLY, so the sampler writes to /data/thermal and falls back to
++# /tmp (tmpfs) when userdata did not mount.  No file is ever written under
++# /var/log: readonly_setup.sh does `mv /var /usr/default && mkdir /var`, so the
++# image ships an EMPTY /var and /var/log exists only if tmpfiles creates it.
++Description=fajita thermal/power CSV sampler
++After=local-fs.target
++RequiresMountsFor=/data
++ConditionPathExists=/FAJITA
++ConditionPathExists=/usr/comma/thermal_log.sh
++
++[Service]
++Type=simple
++Restart=always
++RestartSec=10
++# `date -u -Is` keeps the file name free of '%' -- systemd would try to expand a
++# real strftime specifier there, and a slip in that expansion is a silent path bug.
++ExecStart=/bin/sh -c 'D=/data/thermal; if ! mkdir -p "$D" 2>/dev/null || [ ! -w "$D" ]; then D=/tmp/thermal; mkdir -p "$D" 2>/dev/null || D=/tmp; fi; T=$(date -u -Is | tr -d ":"); echo "fajita-thermal-log: writing $D/thermal-$T.csv"; exec /usr/comma/thermal_log.sh --interval=10 --out="$D/thermal-$T.csv"'
++# thermal_log.sh traps TERM with `rm -rf "$WORK"` but never exits: after the trap
++# the sampling loop keeps running against a deleted spec dir and spins on
++# "cannot open .../spec" (measured on the staged bytes, see report section 5.2).
++# SIGKILL it -- the sampler holds no state worth flushing, so no cleanup is lost.
++KillSignal=SIGKILL
++TimeoutStopSec=10
++StandardOutput=journal
++StandardError=journal
++SyslogIdentifier=fajita-thermal-log
++
++[Install]
++WantedBy=multi-user.target
+--- /dev/null
++++ b/userspace/root/etc/fajita/perf_mode
+@@ -0,0 +1 @@
++default
+--- a/userspace/services.sh
++++ b/userspace/services.sh
+@@ -28,6 +28,20 @@
+ systemctl enable avahi-ssh-publish.service
+ systemctl enable screen_calibration.service
+ 
++# fajita (OnePlus 6T / SDM845) only.  This overlay is device-agnostic: the same
++# userspace/ tree builds the tici/AGNOS image, so the units must be enabled only
++# in an image that carries the /FAJITA marker, never on tici.
++# The two scripts arrive from the patch as mode 0644 -- the rootfs overlay tar
++# below runs with --mode=go-w and patch(1) cannot carry a mode bit, so the
++# executable bit has to be set here, after the overlay copy and before `enable`.
++chmod 755 /usr/comma/perf_mode.sh /usr/comma/thermal_log.sh
++if [ -e /FAJITA ]; then
++  systemctl enable fajita-perf.service
++  systemctl enable fajita-thermal-log.service
++else
++  echo "no /FAJITA marker: fajita perf/thermal units left disabled"
++fi
++
+ # Disable SSH by default, ssh-param-watcher starts it
+ systemctl disable ssh ssh.socket
+ 
+--- a/userspace/root/usr/comma/comma.sh
++++ b/userspace/root/usr/comma/comma.sh
+@@ -16,6 +16,18 @@
+ # use max freq to boot up quickly, then limit
+ echo 1689600 | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq
+ echo 1689600 | sudo tee /sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq
++
++# PHASE23: the two writes above cap Gold+Silver at 1689600 kHz, i.e. ~60% of the
++# SDM845 Gold ceiling (2803200).  Re-apply the configured perf mode immediately
++# AFTER them -- this is the only point that is strictly ordered against them, so
++# no timer/ordering race is possible here.  Skipped unless the image carries the
++# /FAJITA marker; never fatal (a failed apply must not stop openpilot from booting).
++# perf_mode.sh --from-config reads CONFIG_FILES and applies that mode; it must
++# always get the flag (bare invocation is a usage error in the fixed script).
++if [ -e /FAJITA ] && [ -x /usr/comma/perf_mode.sh ]; then
++  echo "applying fajita perf mode"
++  sudo /usr/comma/perf_mode.sh --from-config || echo "perf_mode apply failed (continuing)"
++fi
+ 
+ echo "waiting for magic"
+ for i in {1..200}; do
+--- a/userspace/base_setup.sh
++++ b/userspace/base_setup.sh
+@@ -6,6 +6,14 @@
+ 
+ # Identify this image to openpilot.
+ touch /TICI /AGNOS
++
++# PHASE23: fajita (OnePlus 6T) marker, same mechanism and same place as the two
++# above -- upstream builds it with `touch`, it is NOT a committed file (the
++# userspace/root/ listing at 3c3390f3 contains only etc/ home/ system/ usr/).
++# Only the fajita patch series adds this line, so a tici image never carries it:
++# it is what keeps fajita-perf/thermal-log disabled there (services.sh) and what
++# openpilot's Fajita() hardware selection keys on.
++touch /FAJITA
+ 
+ # Install apt-fast.
+ apt-get update
