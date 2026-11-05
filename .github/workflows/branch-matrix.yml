@@ -241,6 +241,7 @@ jobs:
         run: |
           set -euo pipefail
           KEY="${{ matrix.key }}"
+          PATCH_DIR="${{ matrix.patch_dir }}"
           MODE="${{ matrix.patch_mode }}"
           DIR="$PATCH_ROOT/${PATCH_DIR:-$KEY}"
           EXPECTED="${{ matrix.expected_patches }}"
