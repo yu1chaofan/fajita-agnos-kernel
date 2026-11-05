@@ -92,23 +92,37 @@ jobs:
           set -euo pipefail
           bash scripts/audit_set_e.sh . || { echo "::error::set -e rc-capture audit found violations"; exit 1; }
 
-      - name: negative control — dp tree WITHOUT the fallback must be rejected
+      - name: negative control — a MIS-PATCHED dp tree must be rejected
         run: |
           set -euo pipefail
           W="$(mktemp -d)"
           mkdir -p "$W/raw/selfdrive/modeld"
+          # PHASE45: 负向用例必须模拟「打了 0003 但实现是错的」——
+          # PHASE42 之后 checker 只对「有 0003 痕迹」的树判定，未打 0003 的树
+          # 会返回 2（不适用），拿它当负向用例会误报 "the gate is blind"。
+          # 这里带 PHASE36 标记（= 声称打过 0003）但把 KeyError/ValueError 从
+          # except 元组里去掉 → checker 必须判 FAIL(rc=1)。
           cat > "$W/raw/selfdrive/modeld/helpers.py" <<'PY'
           import json
+          import os
           from pathlib import Path
 
           MODELS_DIR = Path(__file__).resolve().parent / 'models'
           TG_INPUT_DEVICES_PATH = MODELS_DIR / 'tg_input_devices.json'
 
+          def _default_tg_input_devices(process_name, usbgpu):
+            # PHASE36 marker: claims to be the patched version
+            backend = os.getenv("DEV", "QCOM")
+            return {'WARP_DEV': backend, 'QUEUE_DEV': backend}
+
           def get_tg_input_devices(process_name, usbgpu):
-            with open(TG_INPUT_DEVICES_PATH) as f:
-              return json.load(f)[process_name]['default' if not usbgpu else 'usbgpu']
+            try:
+              with open(TG_INPUT_DEVICES_PATH) as f:
+                return json.load(f)[process_name]['default' if not usbgpu else 'usbgpu']
+            except FileNotFoundError:          # deliberately incomplete
+              return _default_tg_input_devices(process_name, usbgpu)
           PY
           rc=0
           python3 checkers/check_runner_semantics.py --root "$W/raw" || rc=$?
           if [ "$rc" -ne 1 ]; then echo "::error::negative control expected rc=1, got $rc (the gate is blind)"; exit 1; fi
-          echo "negative control correctly rejected the unpatched tree"
+          echo "negative control correctly rejected the mis-patched tree"
