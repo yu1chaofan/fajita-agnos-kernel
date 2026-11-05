@@ -44,9 +44,7 @@ env:
   # branch-matrix 补丁的落盘位置（相对本仓库根）
   PATCH_ROOT: patches/branch-matrix
   # 补丁原始出处：port 仓（= 承载 phase21/phase23 的仓库）里的 phase23 目录
-  PORT_PATCH_SRC: port/phase23/hwbase/patches
   # 两个自证脚本的出处（op leg 的 applied 判定依赖它们）
-  CHECKER_DIR: port/phase23/hwbase
 
 jobs:
   leg:
@@ -160,28 +158,10 @@ jobs:
           } > leg-status.txt
           cat leg-status.txt
 
-      - name: Resolve port repo (strict leg only)
-        # op leg 的 applied 判定要跑 phase23 的两个自证脚本，它们只在 port 仓里。
-        # 缺这个变量 → 当步 ::error:: 退出：这条 leg 拿不到判定就是红，不是 skip。
-        if: matrix.patch_mode == 'strict'
-        env:
-          PORT_REPO: ${{ vars.FAJITA_PORT_REPO }}
-        run: |
-          set -euo pipefail
-          if [ -z "${PORT_REPO}" ]; then
-            echo "::error::repo variable FAJITA_PORT_REPO is not set (owner/name of the port repo carrying phase21/phase23)"
-            exit 1
-          fi
-          echo "port repo: ${PORT_REPO}"
-
-      - name: Checkout port repo (checkers + patch source)
-        if: matrix.patch_mode == 'strict'
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: ${{ vars.FAJITA_PORT_REPO }}
-          path: port
-          fetch-depth: 1
-          persist-credentials: false
+      # PHASE41: port 仓 checkout 已移除 —— 五支全 strict 后，补丁与 checker 都在
+      # 本仓（patches/branch-matrix、checkers/、scripts/），port 仓只剩 graceful/skip
+      # 路径的历史引用（port/phase21/api）。留着它会要求一个本仓并不存在的目录，
+      # 属于「为了历史包袱给现役路径加依赖」。
 
       - name: Assert checker scripts + patch sources (literal paths)
         if: matrix.patch_mode == 'strict'
