@@ -170,8 +170,13 @@ def main() -> int:
       frog = None
   if dp is not None:
     src = dp.read_text()
-    if "get_tg_input_devices" in src and "_default_tg_input_devices" not in src:
-      print(f"[dragonpilot] {dp.relative_to(root)}: 未打 0003（无 fallback），判为不适用")
+    # 判据必须是「0003 的痕迹」，不是「有没有 fallback」—— carrot 上游自带
+    # _default_tg_input_devices，用后者判会把 carrot 误判成「已打 0003」，
+    # 然后拿 dp 的 7 条用例去考它（它只 catch FileNotFoundError，必红）。
+    # 0003 的独特痕迹：except 元组里同时有 KeyError 与 ValueError（PHASE36 加的）。
+    patched = ("except (FileNotFoundError, KeyError, ValueError)" in src) or ("PHASE36" in src)
+    if "get_tg_input_devices" in src and not patched:
+      print(f"[dragonpilot] {dp.relative_to(root)}: 未打 0003（非 PHASE36 版 fallback），判为不适用")
       dp = None
 
   ran = 0
