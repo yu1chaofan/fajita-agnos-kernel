@@ -1,0 +1,387 @@
+diff --git a/openpilot/common/hardware/__init__.py b/openpilot/common/hardware/__init__.py
+index 58e1873..32b0528 100644
+--- a/openpilot/common/hardware/__init__.py
++++ b/openpilot/common/hardware/__init__.py
+@@ -8,9 +8,15 @@ from openpilot.common.hardware.pc.hardware import HardwarePc
+ AGNOS = os.path.isfile('/AGNOS')
+ COMMA_HARDWARE = AGNOS
+ PC = not COMMA_HARDWARE
++# OnePlus 6T (fajita) runs an AGNOS-derived sdm845 base, so /AGNOS *and* /TICI
++# are both present and COMMA_HARDWARE is True. A dedicated marker wins over
++# COMMA_HARDWARE so the tici/tizi/mici path keeps its existing behavior.
++FAJITA = os.path.isfile('/FAJITA')
+ 
+-
+-if COMMA_HARDWARE:
++if FAJITA:
++  from openpilot.common.hardware.fajita.hardware import HardwareFajita
++  HARDWARE = cast(HardwareBase, HardwareFajita())
++elif COMMA_HARDWARE:
+   HARDWARE = cast(HardwareBase, HardwareComma())
+ else:
+   HARDWARE = cast(HardwareBase, HardwarePc())
+diff --git a/openpilot/common/hardware/fajita/__init__.py b/openpilot/common/hardware/fajita/__init__.py
+new file mode 100644
+index 0000000..8b13789
+--- /dev/null
++++ b/openpilot/common/hardware/fajita/__init__.py
+@@ -0,0 +1 @@
++
+diff --git a/openpilot/common/hardware/fajita/hardware.py b/openpilot/common/hardware/fajita/hardware.py
+new file mode 100644
+index 0000000..88bd146
+--- /dev/null
++++ b/openpilot/common/hardware/fajita/hardware.py
+@@ -0,0 +1,352 @@
++"""
++OnePlus 6T (fajita / SDM845) hardware implementation for openpilot.
++
++Why this class exists
++---------------------
++The OnePlus 6T port boots an AGNOS-derived sdm845 userland, so BOTH /AGNOS and
++/TICI marker files are present on the root filesystem (measured on
++ci-artifacts/system17/system.img: `/AGNOS` and `/TICI` exist, both 0 bytes).
++That makes `COMMA_HARDWARE = os.path.isfile('/AGNOS')` True and the stock
++selector in openpilot/common/hardware/__init__.py would hand us HardwareComma,
++which unconditionally touches comma-three-only hardware:
++  - /sys/class/hwmon/hwmon1/*          (no such hwmon on a phone)
++  - /sys/class/power_supply/bms/*      (no comma BMS)
++  - SOM_ST_IO / STM_RST_N GPIOs        (no comma carrier board)
++  - comma amplifier over i2c           (no amp)
++Selection is therefore driven by a dedicated /FAJITA marker with priority over
++COMMA_HARDWARE; see the patch to openpilot/common/hardware/__init__.py.
++
++Contract
++--------
++Every override below is annotated with the reference implementation it is
++derived from:
++  comma -> openpilot/common/hardware/comma/hardware.py  (the tici/tizi/mici class)
++  pc    -> openpilot/common/hardware/pc/hardware.py
++  base  -> openpilot/common/hardware/base.py            (default we deliberately keep)
++
++Rule for this file: no method may raise at runtime on missing /sys or /proc
++nodes. Every sysfs/procfs access is either guarded by an existence check or
++wrapped, and degrades to the base-class neutral value.
++Items marked ASSUMED were not observed on the device and need on-device
++confirmation (see port-doc/PHASE23-HWBASE-OPENPILOT.md, "未验证项").
++"""
++
++import os
++import socket
++import subprocess
++
++from openpilot.cereal import log
++from openpilot.common.hardware.base import HardwareBase, ThermalConfig, ThermalZone
++
++NetworkType = log.DeviceState.NetworkType
++NetworkStrength = log.DeviceState.NetworkStrength
++
++DEVICE_TYPE = "fajita"
++
++#: ASSUMED: same panel backlight node name as tici (both are sdm845 + AGNOS
++#: kernels). Verify with: ls /sys/class/backlight/
++BACKLIGHT = "/sys/class/backlight/panel0-backlight"
++KGSL = "/sys/class/kgsl/kgsl-3d0"
++VERSION_FILE = "/VERSION"
++THERMAL_ROOT = "/sys/devices/virtual/thermal"
++DATA_RESET_MARKER = "/data/__system_reset__"
++
++
++def _read(path, default=""):
++  """Read a small sysfs/procfs file; return default when absent (never raises)."""
++  try:
++    with open(path) as f:
++      return f.read()
++  except Exception:
++    return default
++
++
++def _write(path, value):
++  """Best-effort writable-node write; returns False instead of raising."""
++  try:
++    with open(path, "w") as f:
++      f.write(str(value))
++    return True
++  except Exception:
++    return False
++
++
++def _write_sudo(path, value):
++  """Best-effort privileged write via `sudo tee`; returns False instead of raising."""
++  try:
++    with open(os.devnull, "w") as devnull:
++      subprocess.run(["sudo", "tee", path], input=str(value).encode(),
++                     stdout=devnull, stderr=devnull, check=False, timeout=5)
++    return True
++  except Exception:
++    return False
++
++
++def wpa_supplicant_cmd(cmd: str, timeout: float = 0.2) -> dict[str, str]:
++  """Query wpa_supplicant over its control socket.
++
++  Same approach as comma/hardware.py:41-54, but duplicated locally on purpose:
++  importing openpilot.common.hardware.comma.* pulls in GPIO/Amplifier modules
++  that bind comma-carrier-board hardware at import time.
++  """
++  try:
++    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
++      sock.settimeout(timeout)
++      sock.bind(f"\0openpilot-wpa-{os.getpid()}-{time.monotonic_ns()}")
++      sock.connect("/run/wpa_supplicant/wlan0")
++      sock.send(cmd.encode())
++      while True:
++        out = sock.recv(8192).decode("utf-8", "replace")
++        if out.startswith("<"):
++          continue
++        if out.startswith("FAIL"):
++          return {}
++        return dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
++  except Exception:
++    return {}
++
++
++class HardwareFajita(HardwareBase):
++  """OnePlus 6T: SDM845 SoC, no fan, no comma amp/IR/panda-GPIO, no managed modem."""
++
++  # ------------------------------------------------------------------ identity
++
++  def get_device_type(self):
++    # comma:89 derives the codename from /sys/firmware/devicetree/base/model and
++    # strips a "comma " prefix; on a phone the model string has no comma prefix,
++    # so return a constant instead (also keeps fan_controller.py:9, which calls
++    # this at import time, from ever touching the devicetree node).
++    return DEVICE_TYPE
++
++  def get_os_version(self):
++    # comma:85 reads /VERSION unguarded; guarded here, degrading to base:81 (None).
++    return _read(VERSION_FILE).strip() or None
++
++  def get_serial(self):
++    # comma:100 does get_cmdline()['androidboot.serialno'] -> KeyError when the
++    # bootloader does not export it. OnePlus does not, so fall back to sysfs.
++    serial = self.get_cmdline().get("androidboot.serialno", "")
++    if serial:
++      return serial
++    return (_read("/sys/devices/soc0/serial_number").strip()
++            or _read("/sys/class/android_usb/android0/iSerial").strip())
++
++  # ------------------------------------------------------- modem / SIM / network
++
++  def get_imei(self):
++    # base:88 - openpilot does not own the phone modem stack.
++    return ""
++
++  def get_sim_info(self):
++    # base:100 default (ABSENT). comma:146 builds this from /dev/shm/modem,
++    # which does not exist here.
++    return super().get_sim_info()
++
++  def get_sim_lpa(self):
++    # base:109 raises NotImplementedError("SIM LPA not available"). Overridden so
++    # no caller can hit that path at runtime; no eSIM stack on this base.
++    return None
++
++  def get_modem_state(self):
++    # base:148 ({}). comma:78 parses MODEM_STATE_PATH=/dev/shm/modem.
++    return {}
++
++  def get_modem_temperatures(self):
++    # base:145 ([]). comma:247 reads modem temperatures out of the modem state.
++    return []
++
++  def get_modem_data_usage(self):
++    # base:160. comma:397 reports tx/rx from the modem state.
++    return -1, -1
++
++  def _default_route_iface(self):
++    # comma:56-59, with a field-count guard comma's version lacks.
++    iface = None
++    try:
++      with open("/proc/net/route") as f:
++        routes = []
++        for line in f.readlines()[1:]:
++          route = line.split()
++          if len(route) > 6 and route[1] == "00000000" and int(route[3], 16) & 0x1:
++            routes.append((int(route[6]), route[0]))
++      iface = min(routes)[1] if routes else None
++    except Exception:
++      iface = None
++    return iface
++
++  def get_network_type(self):
++    # comma:123 same interface sniffing; the /dev/shm/modem cellular fallback is
++    # dropped because there is no modem state on this base.
++    iface = self._default_route_iface()
++    if iface:
++      if iface.startswith("wlan"):
++        return NetworkType.wifi
++      if iface.startswith("eth"):
++        return NetworkType.ethernet
++    return NetworkType.none
++
++  def get_network_info(self):
++    # comma:164 returns None for devices without a managed modem (mici path).
++    return None
++
++  def get_network_strength(self, network_type):
++    # comma:188 algorithm; cellular branch dropped (no modem state).
++    if network_type == NetworkType.ethernet:
++      return NetworkStrength.great
++    if network_type == NetworkType.wifi:
++      # comma:196-201
++      rssi = wpa_supplicant_cmd("SIGNAL_POLL").get("RSSI")
++      try:
++        dbm = int(rssi) if rssi is not None else None
++      except (TypeError, ValueError):
++        dbm = None
++      if dbm is not None and -100 < dbm <= 0:
++        pct = 120 + max(-100, min(-20, dbm))
++        if pct < 25:
++          return NetworkStrength.poor
++        if pct < 50:
++          return NetworkStrength.moderate
++        if pct < 75:
++          return NetworkStrength.good
++        return NetworkStrength.great
++    return super().get_network_strength(network_type)
++
++  def get_network_metered(self, network_type) -> bool:
++    # base:115 is the correct answer here (wifi/ethernet unmetered). comma:209
++    # needs modem iccid + NetworkManager keyfiles to decide otherwise.
++    return super().get_network_metered(network_type)
++
++  # ------------------------------------------------------------ power / thermal
++
++  def get_current_power_draw(self):
++    # comma:250 reads /sys/class/hwmon/hwmon1/power1_input (absent). Must stay
++    # numeric: power_monitoring.py:77 feeds it straight into integration.
++    return 0.0
++
++  def get_som_power_draw(self):
++    # comma:253 multiplies bms voltage/current (no comma BMS on a phone).
++    return 0.0
++
++  def get_thermal_config(self):
++    # comma:259 SDM845 thermal zone names. ThermalZone.read() already returns 0
++    # for a zone it cannot find (base:28-32), but its /sys listdir is NOT guarded,
++    # so bail out early when the whole thermal class is missing.
++    if not os.path.isdir(THERMAL_ROOT):
++      return ThermalConfig()
++    return ThermalConfig(cpu=[ThermalZone(f"cpu{i}-silver-usr") for i in range(4)] +
++                             [ThermalZone(f"cpu{i}-gold-usr") for i in range(4)],
++                         gpu=[ThermalZone("gpu0-usr"), ThermalZone("gpu1-usr")],
++                         dsp=ThermalZone("compute-hvx-usr"),
++                         memory=ThermalZone("ddr-usr"),
++                         pmic=[ThermalZone("pm8998_tz"), ThermalZone("pm8005_tz")])
++
++  def get_gpu_usage_percent(self):
++    # comma:338 kgsl gpubusy; guarded so a missing node yields 0 (base:142).
++    try:
++      used, total = _read(f"{KGSL}/gpubusy").strip().split()
++      return 100.0 * int(used) / int(total)
++    except Exception:
++      return 0
++
++  # ------------------------------------------------------------------- display
++
++  def set_display_power(self, on: bool):
++    # comma:277 writes bl_power (0 on / 4 off); guarded.
++    _write(f"{BACKLIGHT}/bl_power", "0" if on else "4")
++
++  def set_screen_brightness(self, percentage):
++    # comma:284 scales against max_brightness; guarded.
++    try:
++      max_brightness = float(_read(f"{BACKLIGHT}/max_brightness").strip())
++      if max_brightness > 0:
++        _write(f"{BACKLIGHT}/brightness", int(percentage * (max_brightness / 100.)))
++    except Exception:
++      pass
++
++  def get_screen_brightness(self):
++    # comma:295; base:136 already returns 0 on failure.
++    try:
++      max_brightness = float(_read(f"{BACKLIGHT}/max_brightness").strip())
++      if max_brightness > 0:
++        return int(float(_read(f"{BACKLIGHT}/brightness").strip()) / (max_brightness / 100.))
++    except Exception:
++      pass
++    return 0
++
++  # --------------------------------------------------- lifecycle / tunables
++
++  def booted(self):
++    # comma:421 gates startup on an msm_vidc debugfs state that is not guaranteed
++    # here; returning True keeps hardwared.py:369 from blocking offroad forever.
++    # ASSUMED: verify /sys/kernel/debug/msm_vidc/core0/info on device before
++    # re-enabling the comma heuristic.
++    return True
++
++  def initialize_hardware(self):
++    # comma:346 does amp init, `chmod a+w /dev/kmsg`, SOM_ST_IO fan GPIO,
++    # msm_vidc debugfs writes, IRQ affinity and a pgrep/chrt/taskset dance.
++    # None of that carrier-board plumbing exists here. Keep only guarded,
++    # optional performance writes.
++    gpu_gov = f"{KGSL}/devfreq/governor"
++    if os.path.exists(gpu_gov):
++      _write_sudo(gpu_gov, "performance")
++
++  def set_power_save(self, powersave_enabled):
++    # comma:305 - amplifier part dropped (no amp). CPU part kept, but every node
++    # is existence-checked first so no sudo call is spent on absent paths.
++    for i in range(4, 8):
++      path = f"/sys/devices/system/cpu/cpu{i}/online"
++      if os.path.exists(path):
++        _write_sudo(path, "0" if powersave_enabled else "1")
++
++    for n in ("0", "4"):
++      if powersave_enabled and n == "4":
++        continue
++      gov = f"/sys/devices/system/cpu/cpufreq/policy{n}/scaling_governor"
++      if os.path.exists(gov):
++        _write_sudo(gov, "ondemand" if powersave_enabled else "performance")
++
++  # ------------------------------------------------------------------- actions
++
++  def reboot(self, reason=None):
++    # comma:92
++    try:
++      subprocess.run(["sudo", "reboot"], check=False, timeout=10)
++    except Exception:
++      pass
++
++  def shutdown(self):
++    # comma:256
++    try:
++      subprocess.run(["sudo", "poweroff"], check=False, timeout=10)
++    except Exception:
++      pass
++
++  def uninstall(self):
++    # comma:95 touches /data/__system_reset__ then reboots; /data exists on the
++    # fajita base (AGNOS-style partition layout), guarded anyway.
++    try:
++      with open(DATA_RESET_MARKER, "w"):
++        pass
++      os.sync()
++    except Exception:
++      pass
++    self.reboot()
++
++  def set_ir_power(self, percent: int):
++    # base:163 no-op. comma:111 drives led:switch_2 / led:torch_2 (no IR LED here).
++    pass
++
++  def reset_internal_panda(self):
++    # comma:401 toggles STM_RST_N/STM_BOOT0 on the carrier board. On the 6T the
++    # panda is a USB device, so there is nothing to reset; base:154 no-op.
++    pass
++
++  def recover_internal_panda(self):
++    # comma:410, same reasoning as reset_internal_panda.
++    pass
++
++
++# The task/spec name for this class is Fajita; keep the repo naming convention
++# (HardwareComma / HardwarePc) as the primary symbol and expose the alias.
++Fajita = HardwareFajita
