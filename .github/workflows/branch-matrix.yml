@@ -341,10 +341,19 @@ jobs:
             echo "::error::app/tools/op.sh missing (unexpected upstream layout)"
             exit 1
           fi
-          python3 -c "import acados; print('acados ok')" || {
-            echo "::error::acados not importable after setup; scons cannot evaluate the graph"
+          # PHASE43: op.sh setup 检测到 venv 就把包装进 venv，用系统 python3 验会假红。
+          # 先找出 venv 的 python（app/.venv 或 $VIRTUAL_ENV），再验 import。
+          PY=python3
+          for cand in app/.venv/bin/python .venv/bin/python; do
+            [ -x "$cand" ] && { PY="$cand"; break; }
+          done
+          echo "verify interpreter: $PY"
+          "$PY" -c "import acados; print('acados ok')" || {
+            echo "::error::acados not importable with $PY; scons cannot evaluate the graph"
             exit 1
           }
+          # 把解释器路径写进环境，供后续 scons 步骤用
+          echo "OP_PY=$PY" >> "$GITHUB_ENV"
 
       - name: Python syntax gate (${{ matrix.layout }})
         if: steps.patches.outputs.status == 'applied'
@@ -364,7 +373,8 @@ jobs:
         run: |
           set -o pipefail
           cd app
-          scons -n -j4 2>&1 | tail -n 40 | tee ../scons_dryrun.log
+          # 用 setup 落地的那套解释器（可能是 venv），否则 SConstruct 里的 import 会假红
+          "${OP_PY:-python3}" -m SCons -n -j4 2>&1 | tail -n 40 | tee ../scons_dryrun.log
 
       - name: Build app layer (x86 compile check)
         if: steps.patches.outputs.status == 'applied' && inputs.allow_cpu_build && inputs.heavy_build && matrix.layout == 'openpilot'
