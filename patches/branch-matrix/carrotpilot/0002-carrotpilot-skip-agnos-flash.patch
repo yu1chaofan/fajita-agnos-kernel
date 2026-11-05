@@ -1,0 +1,20 @@
+--- a/openpilot/system/updated/updated.py
++++ b/openpilot/system/updated/updated.py
+@@ -18,7 +18,7 @@
+ from openpilot.common.markdown import parse_markdown
+ from openpilot.common.swaglog import cloudlog
+ from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
+-from openpilot.system.hardware import AGNOS, HARDWARE
++from openpilot.system.hardware import AGNOS, FAJITA, HARDWARE
+ from openpilot.system.version import get_build_metadata
+ from openpilot.system.updated.process import run
+ 
+@@ -419,7 +419,7 @@
+     cloudlog.info("git reset success: %s", '\n'.join(r))
+ 
+     # TODO: show agnos download progress
+-    if AGNOS:
++    if AGNOS and not FAJITA:
+       handle_agnos_update()
+ 
+     # Create the finalized, ready-to-swap update
