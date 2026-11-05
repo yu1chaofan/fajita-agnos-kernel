@@ -1,0 +1,28 @@
+--- a/selfdrive/modeld/runners/__init__.py
++++ b/selfdrive/modeld/runners/__init__.py
+@@ -1,10 +1,22 @@
+ import os
+-from openpilot.system.hardware import TICI
++from openpilot.system.hardware import HARDWARE, TICI
+ from openpilot.selfdrive.modeld.runners.runmodel_pyx import RunModel, Runtime
+ assert Runtime
+ 
+-USE_THNEED = int(os.getenv('USE_THNEED', str(int(TICI))))
+-USE_SNPE = int(os.getenv('USE_SNPE', str(int(TICI))))
++# PHASE33: 原来默认值取 int(TICI)。fajita 底座上 /TICI 也存在（base_setup.sh 会
++# touch），于是 fajita 会被判成 Tici、默认 USE_THNEED=USE_SNPE=1，跑到 thneed /
++# snpemodel_pyx（那是 comma 3X 的 .dlc 运行时），在手机上必炸。
++# 改成按设备类型判定：只有 tici/tizi/mici 才默认走 THNEED/SNPE，其余（fajita/pc）
++# 默认走 ONNX。环境变量仍可强制覆盖，保持与上游行为兼容。
++_DEVICE = HARDWARE.get_device_type()
++_IS_COMMA_DEVICE = _DEVICE in ('tici', 'tizi', 'mici') or bool(TICI) and _DEVICE not in ('fajita', 'pc')
++
++USE_THNEED = int(os.getenv('USE_THNEED', str(int(_IS_COMMA_DEVICE))))
++USE_SNPE = int(os.getenv('USE_SNPE', str(int(_IS_COMMA_DEVICE))))
++if _DEVICE == 'fajita':
++  # fajita 上即便误传了 USE_THNEED=1 也要拦住 —— 宁可显式失败也不要静默跑错的 runtime
++  assert not USE_THNEED or os.getenv('FAJITA_ALLOW_THNEED') == '1', \
++    'fajita: thneed runner is comma-hardware only; set FAJITA_ALLOW_THNEED=1 to override'
+ 
+ class ModelRunner(RunModel):
+   THNEED = 'THNEED'
