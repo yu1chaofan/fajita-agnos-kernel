@@ -7,6 +7,7 @@ on:
   push:
     paths:
       - 'checkers/**'
+      - 'scripts/**'
       - '.github/workflows/checker-selfcheck.yml'
 
 jobs:
@@ -85,6 +86,11 @@ jobs:
           python3 checkers/check_runner_semantics.py --root "$W/plain" > "$W/out.txt" 2>&1 || rc=$?
           cat "$W/out.txt"
           if [ "$rc" -ne 2 ]; then echo "::error::expected rc=2 (not applicable), got $rc"; exit 1; fi
+
+      - name: set -e rc-capture audit (self)
+        run: |
+          set -euo pipefail
+          bash scripts/audit_set_e.sh . || { echo "::error::set -e rc-capture audit found violations"; exit 1; }
 
       - name: negative control — dp tree WITHOUT the fallback must be rejected
         run: |
