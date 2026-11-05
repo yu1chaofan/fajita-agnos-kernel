@@ -168,12 +168,17 @@ jobs:
           set -euo pipefail
           ./build-repo/scripts/materialize.sh
           QCOM=build-repo/agnos/agnos-kernel-sdm845/arch/arm64/boot/dts/qcom
-          # 5 个补丁落地后的可观测结果（不是"补丁命令没报错"就算过）
-          test -f "$QCOM/comma_fajita.dts"
-          grep -q "comma_fajita" "$QCOM/Makefile"
-          test -f build-repo/agnos/agnos-kernel-sdm845/arch/arm64/configs/agnos_fajita.fragment
-          grep -q "smb2_vbus:" "$QCOM/sdm845-pmic-overlay.dtsi"
-          grep -c -E "vbus_dwc3-supply|usb-vbus-boost-gpio2|usb-vbus-ctrl-gpio3" "$QCOM/comma_fajita.dts"
+          # 5 个补丁落地后的可观测结果（不是"补丁命令没报错"就算过）。
+          # PHASE45: 每条断言都带可读失败信息 —— 原来裸 `grep -q` 失败时 set -e
+          # 直接退出，日志只剩 "exit code 1"，完全看不出是哪条断言红的。
+          chk(){ local d=$1; shift; if "$@" >/dev/null 2>&1; then echo "OK   $d"; else echo "::error::$d"; exit 1; fi; }
+          chk "comma_fajita.dts exists"           test -f "$QCOM/comma_fajita.dts"
+          chk "Makefile mentions comma_fajita"    grep -q comma_fajita "$QCOM/Makefile"
+          chk "agnos_fajita.fragment exists"      test -f build-repo/agnos/agnos-kernel-sdm845/arch/arm64/configs/agnos_fajita.fragment
+          chk "sdm845-pmic-overlay.dtsi has smb2_vbus" grep -q "smb2_vbus:" "$QCOM/sdm845-pmic-overlay.dtsi"
+          chk "comma_fajita.dts carries vbus variant marker" \
+            grep -qE "vbus_dwc3-supply|usb-vbus-boost-gpio2|usb-vbus-ctrl-gpio3" "$QCOM/comma_fajita.dts"
+          echo "all 5 landed-state asserts passed"
 
       - name: Assert 0003 inputs (patch source + checker, literal paths)
         # 路径写死成字面量而不是全用变量：phase24/ci/validate.py 会拿这些 token
