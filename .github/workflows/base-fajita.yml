@@ -142,7 +142,10 @@ jobs:
           test "$n" -ge 4 || { echo "::error::expected >=4 pinned commits in repos.lock, got $n"; exit 1; }
           bad=$(grep -E '_COMMIT=' repos.lock | grep -vE '=[0-9a-f]{40}$' || true)
           test -z "$bad" || { echo "::error::non-40hex commit in repos.lock: $bad"; exit 1; }
-          mapfile -t P < <(find patches -name '*.patch' | sort)
+          # PHASE45: 只数「底座补丁」—— patches/agnos-builder/ + patches/kernel/。
+          # patches/branch-matrix/（12 个分支兼容补丁）与 patches/unit/（0003 userspace）
+          # 是给别的 job 用的，不属于 materialize.sh 的输入。
+          mapfile -t P < <(find patches/agnos-builder patches/kernel -name '*.patch' 2>/dev/null | sort)
           printf '%s\n' "${P[@]}"
           # 仍然是 5：PHASE24 的 0003 暂存在 $GITHUB_WORKSPACE/fajita-patches/，
           # 不在 build-repo/patches/ 下，所以这条断言继续只证明「materialize 吃了 5 个底座补丁」。
